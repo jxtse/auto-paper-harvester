@@ -15,6 +15,7 @@ from .clients import (
     DownloadError,
     ElsevierClient,
     CrossrefClient,
+    OpenAlexClient,
     SpringerClient,
     WileyClient,
     batched_download,
@@ -26,7 +27,7 @@ DOI_PATTERN = re.compile(r"10\.\d{4,9}/[\x21-\x7E]+")
 WILEY_PREFIXES = ("10.1002", "10.1111")
 ELSEVIER_PREFIXES = ("10.1016", "10.1011")  # 10.1011 is rare but reserved by Elsevier
 SPRINGER_PREFIXES = ("10.1007", "10.1038", "10.1186")
-DEFAULT_DELAY_SECONDS = 1.1  # respect the 1 PDF/sec cap with a small safety margin
+DEFAULT_DELAY_SECONDS = 1.5  # respect the 1 PDF/sec cap with a small safety margin
 
 
 def load_env_file(path: Path | str = ".env") -> None:
@@ -142,16 +143,26 @@ def download_from_savedrecs(
     count_crossref = sum(1 for rec in records if rec.publisher == "Crossref")
 
     crossref_client: Optional[CrossrefClient] = None
+    openalex_client: Optional[OpenAlexClient] = None
     if count_crossref:
         try:
             crossref_client = CrossrefClient()
         except ValueError as exc:
             LOGGER.warning("Crossref downloads disabled: %s", exc)
+        try:
+            openalex_client = OpenAlexClient()
+        except ValueError as exc:
+            LOGGER.warning("OpenAlex downloads disabled: %s", exc)
+        if not crossref_client and not openalex_client:
+            LOGGER.warning(
+                "No Crossref/OpenAlex configuration available; skipping %d general DOIs.",
+                count_crossref,
+            )
             records = [rec for rec in records if rec.publisher != "Crossref"]
             count_crossref = 0
             if not records:
                 LOGGER.warning(
-                    "No Wiley, Elsevier, or Springer DOIs detected in %s after removing Crossref entries",
+                    "No Wiley, Elsevier, or Springer DOIs detected in %s after removing unhandled entries",
                     savedrecs,
                 )
                 return iter(())
@@ -182,6 +193,7 @@ def download_from_savedrecs(
             output_root=output_dir,
             elsevier_client=elsevier_client,
             crossref_client=crossref_client,
+            openalex_client=openalex_client,
             springer_client=springer_client,
             wiley_client=wiley_client,
             overwrite=overwrite,

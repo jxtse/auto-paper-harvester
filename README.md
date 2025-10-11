@@ -1,6 +1,14 @@
 # Auto Paper Download
 
-`auto-paper-download` 提供一个可独立部署的命令行工具，用于从 Web of Science 导出的 `savedrecs.xls` 文件中提取 DOI，识别对应的出版商（目前支持 Wiley 与 Elsevier），并遵守每秒 1 篇 PDF 的速率限制调用出版商的 Text & Data Mining (TDM) 接口批量下载论文 PDF。
+`auto-paper-download` 是一个命令行工具，可从 Web of Science 导出的 `savedrecs.xls` 文件中提取 DOI，根据出版商自动选择合适的接口并批量下载 PDF。目前内置支持：
+
+- **Wiley** TDM API  
+- **Elsevier** TDM API  
+- **Springer Nature** Open Access API（仅开放获取内容）  
+- **OpenAlex**（抓取开放获取版本）  
+- **Crossref**（作为 OpenAlex 的备用方案）
+
+下载结果按来源分类存放在 `downloads/pdfs/<publisher>/` 目录下，并会自动严格控制速率以满足各家 TDM 限制。
 
 ## 安装
 
@@ -10,29 +18,45 @@ python -m venv .venv
 pip install -e .
 ```
 
-## 准备工作
+## 配置
 
-1. 将 Web of Science 导出的 `savedrecs.xls` 放在仓库根目录，或通过命令行参数指定其他路径。
-2. 配置 `.env` 或环境变量以提供各出版商的 API 凭证：
-   - `WILEY_TDM_TOKEN`
-   - `ELSEVIER_API_KEY`
+1. 将 Web of Science 导出的 `savedrecs.xls` 放在仓库根目录（或在运行时通过 `--savedrecs` 指定路径）。  
+2. 在 `.env` 或环境变量中提供所需凭证/联系方式：
 
-工具会优先加载当前目录下的 `.env` 文件（可选）。
+   ```ini
+   WILEY_TDM_TOKEN=...
+   ELSEVIER_API_KEY=...
+   SPRINGER_API_KEY=...          # 可选，仅下载开放获取条目
+   CROSSREF_MAILTO=you@example.com
+   OPENALEX_MAILTO=you@example.com
+   ```
 
-## 使用方法
+   - 如果缺少某个凭证，相关出版商的内容会被跳过。  
+   - Crossref/OpenAlex 至少需要一个 `mailto`（用于 polite requests）。OpenAlex 会优先使用，Crossref 仅在 OpenAlex 失败时作为备用。  
+   - Springer API 仅返回开放获取条目；非 OA 内容需通过机构授权或人工处理。
+
+工具默认会优先读取当前目录下的 `.env` 文件。
+
+## 使用
 
 ```bash
-auto-paper-download --output-dir downloads/pdfs
+python -m auto_paper_download --verbose
 ```
 
-可选参数：
+常用参数：
 
-- `--savedrecs`：自定义 `savedrecs.xls` 路径
-- `--max-per-publisher`：限制每个出版商的下载篇数，便于快速验证
-- `--delay`：自定义下载间隔，默认 1.1 秒以满足每秒 1 篇 PDF 的限制
-- `--verbose`：输出更详细的调试日志
+- `--savedrecs`：指定 `savedrecs.xls` 路径。
+- `--output-dir`：自定义下载目录（默认 `downloads/pdfs`）。
+- `--max-per-publisher`：限制每个出版商下载篇数，用于烟囱测试。
+- `--delay`：自定义下载间隔（默认 1.1s，最低 1.0s）。
+- `--overwrite`：即使文件已存在也重新下载。
+- `--verbose`：输出详细日志，便于排查失败原因。
 
-成功下载的 PDF 会按出版商分类存放在输出目录，例如 `downloads/pdfs/wiley/`。
+## 提示
+
+- 非开放获取的 Springer、ACS、RSC 等内容需要出版社提供 TDM 访问或在浏览器中手动获取。  
+- 如果遇到 403/Cloudflare 挑战，通常需要使用校内/白名单 IP 或联系出版社开通自动化访问。  
+- 可以通过日志快速定位失败原因，并根据需要扩展新的客户端。
 
 ## 测试
 

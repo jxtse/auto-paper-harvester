@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Iterator, Optional, Sequence
+from urllib.parse import quote
 import time
 
 import requests
@@ -494,6 +495,114 @@ class CrossrefClient:
         return pdf_links[0] if pdf_links else None
 
 
+class OpenAlexClient:
+    """
+    OpenAlex helper for retrieving open-access PDFs.
+
+    Notes
+    -----
+    * Documentation: https://docs.openalex.org/how-to-use-the-api/api-overview
+    * Requires a polite contact email (``OPENALEX_MAILTO`` or ``mailto=`` argument).
+    * Only returns PDFs when OpenAlex reports an open-access location with a usable URL.
+    """
+
+    BASE_URL = "https://api.openalex.org/works/"
+
+    def __init__(
+        self,
+        *,
+        mailto: Optional[str] = None,
+        session: Optional[requests.Session] = None,
+        user_agent: str = DEFAULT_USER_AGENT,
+    ) -> None:
+        mailto = mailto or os.getenv("OPENALEX_MAILTO")
+        if not mailto:
+            raise ValueError(
+                "OpenAlexClient requires a contact email. "
+                "Set OPENALEX_MAILTO or pass mailto= explicitly."
+            )
+        self._mailto = mailto
+        self._session = session or requests.Session()
+        ua_with_contact = f"{user_agent} (mailto:{self._mailto})"
+        self._session.headers.update(
+            {
+                "User-Agent": ua_with_contact,
+                "Accept": "application/json",
+            }
+        )
+
+    def download_pdf(
+        self,
+        *,
+        doi: str,
+        destination: Path,
+        overwrite: bool = False,
+    ) -> Path:
+        if not doi:
+            raise ValueError("OpenAlexClient.download_pdf requires a DOI.")
+        if destination.exists() and not overwrite:
+            LOGGER.info("Skipping existing file: %s", destination)
+            return destination
+
+        work = self._fetch_work(doi)
+        if not self._is_open_access(work):
+            raise DownloadError(f"OpenAlex reports DOI {doi} is not open access.")
+
+        pdf_url = self._extract_pdf_url(work)
+        if not pdf_url:
+            raise DownloadError(f"No open-access PDF URL available via OpenAlex for DOI {doi}")
+
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        LOGGER.debug("OpenAlex download: %s -> %s", pdf_url, destination)
+        response = self._session.get(
+            pdf_url, headers={"Accept": "application/pdf"}, timeout=120, stream=True
+        )
+        if response.status_code != requests.codes.ok:
+            raise DownloadError(
+                f"OpenAlex download failed ({response.status_code}): {response.text}"
+            )
+
+        with destination.open("wb") as fout:
+            for chunk in response.iter_content(chunk_size=65536):
+                if chunk:
+                    fout.write(chunk)
+        return destination
+
+    def _fetch_work(self, doi: str) -> dict:
+        identifier = quote(f"https://doi.org/{doi}", safe=":/")
+        url = f"{self.BASE_URL}{identifier}"
+        params = {"mailto": self._mailto}
+        LOGGER.debug("OpenAlex metadata lookup %s params=%s", url, params)
+        response = self._session.get(url, params=params, timeout=60)
+        if response.status_code != requests.codes.ok:
+            raise DownloadError(
+                f"OpenAlex metadata lookup failed ({response.status_code}): {response.text}"
+            )
+        return response.json()
+
+    @staticmethod
+    def _is_open_access(work: dict) -> bool:
+        open_access = work.get("open_access") or {}
+        return bool(open_access.get("is_oa"))
+
+    @staticmethod
+    def _extract_pdf_url(work: dict) -> Optional[str]:
+        candidates: list[str] = []
+
+        def add_location(loc: Optional[dict]) -> None:
+            if not isinstance(loc, dict):
+                return
+            pdf_url = loc.get("pdf_url") or loc.get("url_for_pdf")
+            if pdf_url:
+                candidates.append(pdf_url)
+
+        add_location(work.get("best_oa_location"))
+        for loc in work.get("locations", []):
+            add_location(loc)
+
+        return candidates[0] if candidates else None
+
+
 class ElsevierClient:
     """
     Elsevier Text & Data Mining (TDM) API client.
@@ -641,6 +750,7 @@ def batched_download(
     output_root: Path,
     elsevier_client: Optional[ElsevierClient] = None,
     crossref_client: Optional[CrossrefClient] = None,
+    openalex_client: Optional[OpenAlexClient] = None,
     springer_client: Optional[SpringerClient] = None,
     wiley_client: Optional[WileyClient] = None,
     overwrite: bool = False,
@@ -692,17 +802,49 @@ def batched_download(
                     overwrite=overwrite,
                 )
             elif "crossref" in publisher:
-                if not crossref_client:
-                    raise DownloadError("CrossrefClient missing for Crossref record.")
                 if not record.doi:
                     raise DownloadError(f"No DOI for Crossref record: {record}")
                 fname = record.doi.replace("/", "_")
-                output_path = output_root / "crossref" / f"{fname}.pdf"
-                yield crossref_client.download_pdf(
-                    doi=record.doi,
-                    destination=output_path,
-                    overwrite=overwrite,
-                )
+                tried: list[Exception] = []
+                success = False
+                if openalex_client:
+                    try:
+                        output_path = output_root / "openalex" / f"{fname}.pdf"
+                        yield openalex_client.download_pdf(
+                            doi=record.doi,
+                            destination=output_path,
+                            overwrite=overwrite,
+                        )
+                        success = True
+                    except Exception as exc:  # noqa: BLE001
+                        LOGGER.debug(
+                            "OpenAlexClient failed for %s (%s); falling back to Crossref if possible",
+                            record.doi,
+                            exc,
+                        )
+                        tried.append(exc)
+                if not success and crossref_client:
+                    try:
+                        output_path = output_root / "crossref" / f"{fname}.pdf"
+                        yield crossref_client.download_pdf(
+                            doi=record.doi,
+                            destination=output_path,
+                            overwrite=overwrite,
+                        )
+                        success = True
+                    except Exception as exc:  # noqa: BLE001
+                        LOGGER.debug(
+                            "CrossrefClient failed for %s (%s)",
+                            record.doi,
+                            exc,
+                        )
+                        tried.append(exc)
+                if not success:
+                    if tried:
+                        raise tried[-1]
+                    raise DownloadError(
+                        "Neither OpenAlexClient nor CrossrefClient configured for Crossref record."
+                    )
             else:
                 raise DownloadError(
                     f"Unsupported publisher for record {record.publisher}: {record.title}"
