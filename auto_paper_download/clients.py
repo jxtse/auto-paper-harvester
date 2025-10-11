@@ -1,11 +1,13 @@
 import logging
 import os
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, Iterator, Optional
+from typing import Iterable, Iterator, Optional, Sequence
 import time
 
 import requests
+from requests.utils import parse_header_links
 
 LOGGER = logging.getLogger(__name__)
 
@@ -36,11 +38,11 @@ class WileyClient:
     -----
     * Documentation: https://onlinelibrary.wiley.com/library-info/resources/text-and-datamining
     * The API token issued by Wiley should be stored in the ``WILEY_TDM_TOKEN`` env var.
-    * Wiley's endpoints expect a bearer token in the ``Authorization`` header.
+    * Wiley's endpoints expect the token in the ``Wiley-TDM-Client-Token`` header.
     * Queries follow Wiley's Lucene-like syntax. Keep them specific (e.g. ``"enzyme kinetics" AND catalysis``).
     """
 
-    BASE_URL = "https://onlinelibrary.wiley.com/api/tdm/v1"
+    BASE_URL = "https://api.wiley.com/onlinelibrary/tdm/v1"
 
     def __init__(
         self,
@@ -59,7 +61,7 @@ class WileyClient:
         self._session = session or requests.Session()
         self._session.headers.update(
             {
-                "Authorization": f"Bearer {token}",
+                "Wiley-TDM-Client-Token": token,
                 "Accept": "application/json",
                 "User-Agent": user_agent,
             }
@@ -134,7 +136,7 @@ class WileyClient:
             return destination
 
         destination.parent.mkdir(parents=True, exist_ok=True)
-        url = f"{self.BASE_URL}/articles/{doi}/pdf"
+        url = f"{self.BASE_URL}/articles/{doi}"
         LOGGER.debug("Wiley download: %s -> %s", url, destination)
         headers = {"Accept": "application/pdf"}
         response = self._session.get(url, headers=headers, timeout=120, stream=True)
@@ -148,6 +150,348 @@ class WileyClient:
                 if chunk:
                     fout.write(chunk)
         return destination
+
+
+class SpringerClient:
+    """
+    Springer Nature Open Access API client.
+
+    Notes
+    -----
+    * Documentation: https://dev.springernature.com/docs/quick-start/making-first-api-call/
+    * Requires an API key stored in ``SPRINGER_API_KEY`` (or passed via ``api_key``).
+    * The API returns metadata that includes pre-signed PDF URLs for open access content.
+    """
+
+    METADATA_URL = "https://api.springernature.com/metadata/json"
+    OPENACCESS_URL = "https://api.springernature.com/openaccess/json"
+
+    def __init__(
+        self,
+        *,
+        api_key: Optional[str] = None,
+        session: Optional[requests.Session] = None,
+        user_agent: str = DEFAULT_USER_AGENT,
+    ) -> None:
+        api_key = (
+            api_key
+            or os.getenv("SPRINGER_API_KEY")
+            or os.getenv("SPRINGER_NATURE_API_KEY")
+        )
+        if not api_key:
+            raise ValueError(
+                "SpringerClient requires an API key. "
+                "Set SPRINGER_API_KEY or pass api_key= explicitly."
+            )
+
+        self._api_key = api_key
+        self._session = session or requests.Session()
+        self._session.headers.update(
+            {
+                "User-Agent": user_agent,
+                "Accept": "application/json",
+            }
+        )
+
+    def search(
+        self,
+        *,
+        query: str,
+        page_size: int = 10,
+        start: int = 1,
+    ) -> list[ArticleRecord]:
+        params = {
+            "q": query,
+            "p": page_size,
+            "s": start,
+            "api_key": self._api_key,
+        }
+        LOGGER.debug("Springer search params=%s", params)
+        response = self._session.get(self.METADATA_URL, params=params, timeout=60)
+        if response.status_code == requests.codes.unauthorized:
+            LOGGER.debug("Springer metadata search unauthorized, retrying with openaccess endpoint.")
+            response = self._session.get(self.OPENACCESS_URL, params=params, timeout=60)
+        if response.status_code != requests.codes.ok:
+            raise DownloadError(
+                f"Springer search failed ({response.status_code}): {response.text}"
+            )
+
+        payload = response.json()
+        records: list[ArticleRecord] = []
+        for item in payload.get("records", []):
+            doi = item.get("doi")
+            url_entries = item.get("url", [])
+            pdf_url = self._select_pdf_url(url_entries)
+            records.append(
+                ArticleRecord(
+                    title=item.get("title", ""),
+                    doi=doi,
+                    url=pdf_url,
+                    publisher="Springer",
+                )
+            )
+        return records
+
+    def download_pdf(
+        self,
+        *,
+        doi: str,
+        destination: Path,
+        overwrite: bool = False,
+    ) -> Path:
+        if destination.exists() and not overwrite:
+            LOGGER.info("Skipping existing file: %s", destination)
+            return destination
+
+        record = self._fetch_metadata_for_doi(doi)
+        pdf_url = self._select_pdf_url(record.get("url", []))
+        if not pdf_url:
+            pdf_url = self._fallback_pdf_url(doi)
+        if not pdf_url:
+            raise DownloadError(f"No PDF URL available for Springer DOI {doi}")
+
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        LOGGER.debug("Springer download: %s -> %s", pdf_url, destination)
+        response = self._session.get(
+            pdf_url, headers={"Accept": "application/pdf"}, timeout=120, stream=True
+        )
+        if response.status_code != requests.codes.ok:
+            raise DownloadError(
+                f"Springer download failed ({response.status_code}): {response.text}"
+            )
+
+        with destination.open("wb") as fout:
+            for chunk in response.iter_content(chunk_size=65536):
+                if chunk:
+                    fout.write(chunk)
+        return destination
+
+    def _fetch_metadata_for_doi(self, doi: str) -> dict:
+        params = {"q": f"doi:{doi}", "p": 1, "api_key": self._api_key}
+        LOGGER.debug("Springer metadata lookup params=%s", params)
+        response = self._session.get(self.METADATA_URL, params=params, timeout=60)
+        if response.status_code == requests.codes.unauthorized:
+            LOGGER.debug("Springer metadata lookup unauthorized, retrying with openaccess endpoint.")
+            response = self._session.get(self.OPENACCESS_URL, params=params, timeout=60)
+        if response.status_code != requests.codes.ok:
+            raise DownloadError(
+                f"Springer metadata lookup failed ({response.status_code}): {response.text}"
+            )
+        payload = response.json()
+        records = payload.get("records", [])
+        if not records:
+            raise DownloadError(f"Springer metadata not found for DOI {doi}")
+        return records[0]
+
+    @staticmethod
+    def _select_pdf_url(url_entries: list[dict]) -> Optional[str]:
+        for entry in url_entries:
+            if entry.get("format", "").lower() == "pdf" and entry.get("value"):
+                return entry["value"]
+        return None
+
+    @staticmethod
+    def _fallback_pdf_url(doi: str) -> Optional[str]:
+        if not doi:
+            return None
+        return f"https://link.springer.com/content/pdf/{doi}.pdf"
+
+
+class CrossrefClient:
+    """
+    Crossref Text & Data Mining helper.
+
+    Notes
+    -----
+    * Documentation: https://www.crossref.org/documentation/retrieve-metadata/rest-api/text-and-data-mining-for-researchers/
+    * Requires a contact email (set ``CROSSREF_MAILTO`` or pass ``mailto=``) so Crossref can reach you.
+    * Optionally enforces a safelist of license URLs via ``license_safelist`` or ``CROSSREF_LICENSE_SAFELIST``.
+    """
+
+    WORK_URL_TEMPLATE = "https://api.crossref.org/works/{doi}"
+    DOI_RESOLVER_TEMPLATE = "https://doi.org/{doi}"
+    UNIXSD_ACCEPT = "application/vnd.crossref.unixsd+xml"
+
+    def __init__(
+        self,
+        *,
+        mailto: Optional[str] = None,
+        license_safelist: Optional[Sequence[str]] = None,
+        session: Optional[requests.Session] = None,
+        user_agent: str = DEFAULT_USER_AGENT,
+    ) -> None:
+        mailto = mailto or os.getenv("CROSSREF_MAILTO")
+        if not mailto:
+            raise ValueError(
+                "CrossrefClient requires a contact email. "
+                "Set CROSSREF_MAILTO or pass mailto= explicitly."
+            )
+
+        env_safelist = os.getenv("CROSSREF_LICENSE_SAFELIST")
+        safelist = list(license_safelist or [])
+        if env_safelist:
+            safelist.extend(
+                entry.strip() for entry in env_safelist.split(",") if entry.strip()
+            )
+        self._license_safelist = [entry.lower() for entry in safelist] or None
+
+        self._mailto = mailto
+        self._session = session or requests.Session()
+        ua_with_contact = f"{user_agent} (mailto:{self._mailto})"
+        self._session.headers.update(
+            {
+                "User-Agent": ua_with_contact,
+                "Accept": "application/json",
+            }
+        )
+
+    def download_pdf(
+        self,
+        *,
+        doi: str,
+        destination: Path,
+        overwrite: bool = False,
+    ) -> Path:
+        if not doi:
+            raise ValueError("CrossrefClient.download_pdf requires a DOI.")
+
+        if destination.exists() and not overwrite:
+            LOGGER.info("Skipping existing file: %s", destination)
+            return destination
+
+        work = self._fetch_work_metadata(doi)
+        if not self._license_allowed(work):
+            raise DownloadError(
+                f"Crossref license for DOI {doi} not in allowed safelist."
+            )
+
+        pdf_url = self._select_pdf_url(work)
+        if not pdf_url:
+            pdf_url = self._extract_pdf_from_link_header(doi)
+        if not pdf_url:
+            raise DownloadError(f"No PDF link found via Crossref for DOI {doi}")
+
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        LOGGER.debug("Crossref download: %s -> %s", pdf_url, destination)
+        response = self._session.get(
+            pdf_url, headers={"Accept": "application/pdf"}, timeout=120, stream=True
+        )
+        if response.status_code != requests.codes.ok:
+            raise DownloadError(
+                f"Crossref download failed ({response.status_code}): {response.text}"
+            )
+
+        with destination.open("wb") as fout:
+            for chunk in response.iter_content(chunk_size=65536):
+                if chunk:
+                    fout.write(chunk)
+        return destination
+
+    def _fetch_work_metadata(self, doi: str) -> dict:
+        url = self.WORK_URL_TEMPLATE.format(doi=doi)
+        params = {"mailto": self._mailto}
+        LOGGER.debug("Crossref metadata lookup %s params=%s", url, params)
+        response = self._session.get(url, params=params, timeout=60)
+        if response.status_code != requests.codes.ok:
+            raise DownloadError(
+                f"Crossref metadata lookup failed ({response.status_code}): {response.text}"
+            )
+        payload = response.json()
+        return payload.get("message", {})
+
+    def _license_allowed(self, work: dict) -> bool:
+        if not self._license_safelist:
+            return True
+
+        licenses = work.get("license") or []
+        if not licenses:
+            return False
+
+        now = datetime.now(timezone.utc)
+        for entry in licenses:
+            url = (entry.get("URL") or "").lower()
+            if not url:
+                continue
+            if not self._is_license_active(entry, now):
+                continue
+            if any(url.startswith(prefix) for prefix in self._license_safelist):
+                return True
+        return False
+
+    @staticmethod
+    def _is_license_active(entry: dict, now: datetime) -> bool:
+        start = entry.get("start")
+        if not start:
+            return True
+        timestamp = start.get("timestamp")
+        if timestamp is not None:
+            try:
+                start_dt = datetime.fromtimestamp(timestamp / 1000, tz=timezone.utc)
+            except Exception:  # noqa: BLE001
+                start_dt = None
+        else:
+            date_parts = start.get("date-parts") if isinstance(start, dict) else None
+            start_dt = None
+            if date_parts:
+                parts = date_parts[0]
+                year = parts[0]
+                month = parts[1] if len(parts) > 1 else 1
+                day = parts[2] if len(parts) > 2 else 1
+                try:
+                    start_dt = datetime(year, month, day, tzinfo=timezone.utc)
+                except ValueError:
+                    start_dt = None
+        if not start_dt:
+            return True
+        return start_dt <= now
+
+    @staticmethod
+    def _preferred_link(links: list[dict]) -> Optional[str]:
+        candidates: list[tuple[int, str]] = []
+        for link in links:
+            if (
+                (link.get("content-type") or "").lower() == "application/pdf"
+                and link.get("URL")
+            ):
+                priority = 0 if link.get("intended-application") == "text-mining" else 1
+                candidates.append((priority, link["URL"]))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: item[0])
+        return candidates[0][1]
+
+    def _select_pdf_url(self, work: dict) -> Optional[str]:
+        links = work.get("link") or []
+        if not isinstance(links, list):
+            return None
+        return self._preferred_link(links)
+
+    def _extract_pdf_from_link_header(self, doi: str) -> Optional[str]:
+        url = self.DOI_RESOLVER_TEMPLATE.format(doi=doi)
+        headers = {"Accept": self.UNIXSD_ACCEPT}
+        LOGGER.debug("Crossref link header lookup %s", url)
+        try:
+            response = self._session.head(
+                url, headers=headers, timeout=30, allow_redirects=True
+            )
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.debug("Crossref HEAD request failed: %s", exc)
+            return None
+        if response.status_code != requests.codes.ok:
+            LOGGER.debug(
+                "Crossref HEAD returned %s for DOI %s", response.status_code, doi
+            )
+            return None
+        link_header = response.headers.get("Link")
+        if not link_header:
+            return None
+        parsed = parse_header_links(link_header.rstrip(">").replace(">,<", ">, <"))
+        pdf_links = [
+            entry.get("url")
+            for entry in parsed
+            if (entry.get("type") or "").lower() == "application/pdf"
+        ]
+        return pdf_links[0] if pdf_links else None
 
 
 class ElsevierClient:
@@ -296,6 +640,8 @@ def batched_download(
     records: Iterable[ArticleRecord],
     output_root: Path,
     elsevier_client: Optional[ElsevierClient] = None,
+    crossref_client: Optional[CrossrefClient] = None,
+    springer_client: Optional[SpringerClient] = None,
     wiley_client: Optional[WileyClient] = None,
     overwrite: bool = False,
     delay_seconds: Optional[float] = None,
@@ -329,6 +675,30 @@ def batched_download(
                 fname = record.doi.replace("/", "_")
                 output_path = output_root / "wiley" / f"{fname}.pdf"
                 yield wiley_client.download_pdf(
+                    doi=record.doi,
+                    destination=output_path,
+                    overwrite=overwrite,
+                )
+            elif "springer" in publisher:
+                if not springer_client:
+                    raise DownloadError("SpringerClient missing for Springer record.")
+                if not record.doi:
+                    raise DownloadError(f"No DOI for Springer record: {record}")
+                fname = record.doi.replace("/", "_")
+                output_path = output_root / "springer" / f"{fname}.pdf"
+                yield springer_client.download_pdf(
+                    doi=record.doi,
+                    destination=output_path,
+                    overwrite=overwrite,
+                )
+            elif "crossref" in publisher:
+                if not crossref_client:
+                    raise DownloadError("CrossrefClient missing for Crossref record.")
+                if not record.doi:
+                    raise DownloadError(f"No DOI for Crossref record: {record}")
+                fname = record.doi.replace("/", "_")
+                output_path = output_root / "crossref" / f"{fname}.pdf"
+                yield crossref_client.download_pdf(
                     doi=record.doi,
                     destination=output_path,
                     overwrite=overwrite,

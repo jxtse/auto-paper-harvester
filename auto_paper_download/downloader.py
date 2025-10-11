@@ -8,12 +8,14 @@ import logging
 import os
 import re
 from pathlib import Path
-from typing import Iterable, Iterator
+from typing import Iterable, Iterator, Optional
 
 from .clients import (
     ArticleRecord,
     DownloadError,
     ElsevierClient,
+    CrossrefClient,
+    SpringerClient,
     WileyClient,
     batched_download,
 )
@@ -23,6 +25,7 @@ LOGGER = logging.getLogger(__name__)
 DOI_PATTERN = re.compile(r"10\.\d{4,9}/[\x21-\x7E]+")
 WILEY_PREFIXES = ("10.1002", "10.1111")
 ELSEVIER_PREFIXES = ("10.1016", "10.1011")  # 10.1011 is rare but reserved by Elsevier
+SPRINGER_PREFIXES = ("10.1007", "10.1038", "10.1186")
 DEFAULT_DELAY_SECONDS = 1.1  # respect the 1 PDF/sec cap with a small safety margin
 
 
@@ -70,7 +73,9 @@ def classify_publisher(doi: str) -> str | None:
         return "Wiley"
     if any(lowered.startswith(prefix) for prefix in ELSEVIER_PREFIXES):
         return "Elsevier"
-    return None
+    if any(lowered.startswith(prefix) for prefix in SPRINGER_PREFIXES):
+        return "Springer"
+    return "Crossref"
 
 
 def records_from_dois(dois: Iterable[str]) -> list[ArticleRecord]:
@@ -125,19 +130,43 @@ def download_from_savedrecs(
         records = _limit_records_per_publisher(records, max_per_publisher)
 
     if not records:
-        LOGGER.warning("No Wiley or Elsevier DOIs detected in %s", savedrecs)
+        LOGGER.warning(
+            "No Wiley, Elsevier, Springer, or Crossref-eligible DOIs detected in %s",
+            savedrecs,
+        )
         return iter(())
 
-    need_wiley = any(rec.publisher == "Wiley" for rec in records)
-    need_elsevier = any(rec.publisher == "Elsevier" for rec in records)
-    wiley_client = WileyClient() if need_wiley else None
-    elsevier_client = ElsevierClient() if need_elsevier else None
+    count_wiley = sum(1 for rec in records if rec.publisher == "Wiley")
+    count_elsevier = sum(1 for rec in records if rec.publisher == "Elsevier")
+    count_springer = sum(1 for rec in records if rec.publisher == "Springer")
+    count_crossref = sum(1 for rec in records if rec.publisher == "Crossref")
+
+    crossref_client: Optional[CrossrefClient] = None
+    if count_crossref:
+        try:
+            crossref_client = CrossrefClient()
+        except ValueError as exc:
+            LOGGER.warning("Crossref downloads disabled: %s", exc)
+            records = [rec for rec in records if rec.publisher != "Crossref"]
+            count_crossref = 0
+            if not records:
+                LOGGER.warning(
+                    "No Wiley, Elsevier, or Springer DOIs detected in %s after removing Crossref entries",
+                    savedrecs,
+                )
+                return iter(())
+
+    wiley_client = WileyClient() if count_wiley else None
+    elsevier_client = ElsevierClient() if count_elsevier else None
+    springer_client = SpringerClient() if count_springer else None
 
     output_dir.mkdir(parents=True, exist_ok=True)
     LOGGER.info(
-        "Starting downloads: %d Wiley, %d Elsevier",
-        sum(1 for r in records if r.publisher == "Wiley"),
-        sum(1 for r in records if r.publisher == "Elsevier"),
+        "Starting downloads: %d Wiley, %d Elsevier, %d Springer, %d Crossref",
+        count_wiley,
+        count_elsevier,
+        count_springer,
+        count_crossref,
     )
 
     enforced_delay = max(delay_seconds, 1.0)
@@ -152,6 +181,8 @@ def download_from_savedrecs(
             records=records,
             output_root=output_dir,
             elsevier_client=elsevier_client,
+            crossref_client=crossref_client,
+            springer_client=springer_client,
             wiley_client=wiley_client,
             overwrite=overwrite,
             delay_seconds=enforced_delay,
