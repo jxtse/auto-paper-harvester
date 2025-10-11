@@ -1,0 +1,19 @@
+[project]
+name = "auto-paper-download"
+version = "0.1.0"
+description = "Automated PDF downloader for DOIs exported from Web of Science."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+  "requests>=2.31.0",
+]
+authors = [
+  { name = "EnzyExtract Maintainers" },
+]
+
+[project.scripts]
+auto-paper-download = "auto_paper_download.__main__:main"
+
+[build-system]
+requires = ["setuptools>=67", "wheel"]
+build-backend = "setuptools.build_meta"
