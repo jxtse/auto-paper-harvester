@@ -31,6 +31,21 @@ def _safe_identifier(identifier: str) -> str:
     return cleaned[:150]
 
 
+def _article_destination(article_dir: Path, base_name: str) -> Path:
+    """
+    Resolve the primary PDF path inside ``article_dir`` and migrate legacy article.pdf if present.
+    """
+    article_dir.mkdir(parents=True, exist_ok=True)
+    destination = article_dir / f"{base_name}.pdf"
+    legacy = article_dir / "article.pdf"
+    if legacy.exists() and not destination.exists():
+        try:
+            legacy.rename(destination)
+        except OSError:  # noqa: PERF203
+            LOGGER.debug("Failed to rename legacy article.pdf: %s", legacy, exc_info=True)
+    return destination
+
+
 class DownloadError(RuntimeError):
     """Raised when a publisher download or search request fails."""
 
@@ -790,7 +805,7 @@ def batched_download(
                     raise DownloadError(f"No DOI/PII for Elsevier record: {record}")
                 fname = _safe_identifier(identifier)
                 article_dir = output_root / "elsevier" / fname
-                pdf_path = article_dir / "article.pdf"
+                pdf_path = _article_destination(article_dir, fname)
                 pdf_path = elsevier_client.download_pdf(
                     doi=record.doi,
                     pii=record.pii,
@@ -813,7 +828,7 @@ def batched_download(
                     raise DownloadError(f"No DOI for Wiley record: {record}")
                 fname = _safe_identifier(record.doi)
                 article_dir = output_root / "wiley" / fname
-                pdf_path = article_dir / "article.pdf"
+                pdf_path = _article_destination(article_dir, fname)
                 pdf_path = wiley_client.download_pdf(
                     doi=record.doi,
                     destination=pdf_path,
@@ -834,7 +849,7 @@ def batched_download(
                     raise DownloadError(f"No DOI for Springer record: {record}")
                 fname = _safe_identifier(record.doi)
                 article_dir = output_root / "springer" / fname
-                pdf_path = article_dir / "article.pdf"
+                pdf_path = _article_destination(article_dir, fname)
                 pdf_path = springer_client.download_pdf(
                     doi=record.doi,
                     destination=pdf_path,
@@ -857,7 +872,7 @@ def batched_download(
                 if openalex_client:
                     try:
                         article_dir = output_root / "openalex" / fname
-                        pdf_path = article_dir / "article.pdf"
+                        pdf_path = _article_destination(article_dir, fname)
                         pdf_path = openalex_client.download_pdf(
                             doi=record.doi,
                             destination=pdf_path,
@@ -882,7 +897,7 @@ def batched_download(
                 if not success and crossref_client:
                     try:
                         article_dir = output_root / "crossref" / fname
-                        pdf_path = article_dir / "article.pdf"
+                        pdf_path = _article_destination(article_dir, fname)
                         pdf_path = crossref_client.download_pdf(
                             doi=record.doi,
                             destination=pdf_path,

@@ -4,7 +4,8 @@
 exports, identifies DOIs, selects the appropriate publisher interface, and downloads the
 article PDF together with any Supplementary Information (SI) assets that can be detected
 on the landing page. Each article ends up in
-`downloads/pdfs/<publisher>/<doi-slug>/` with an `article.pdf` plus any SI files.
+`downloads/pdfs/<publisher>/<doi-slug>/` with the main PDF named after the DOI slug,
+plus any SI files located during scraping.
 
 Supported sources:
 - Wiley Text & Data Mining API
