@@ -1,65 +1,85 @@
-# Auto Paper Download
+﻿# Auto Paper Download
 
-`auto-paper-download` 是一个命令行工具，可从 Web of Science 导出的 `savedrecs.xls` 文件中提取 DOI，根据出版商自动选择合适的接口并批量下载 PDF。目前内置支持：
+`auto-paper-download` is a command line helper that parses Web of Science `savedrecs.xls`
+exports, identifies DOIs, selects the appropriate publisher interface, and downloads the
+article PDF together with any Supplementary Information (SI) assets that can be detected
+on the landing page. Each article ends up in
+`downloads/pdfs/<publisher>/<doi-slug>/` with an `article.pdf` plus any SI files.
 
-- **Wiley** TDM API  
-- **Elsevier** TDM API  
-- **Springer Nature** Open Access API（仅开放获取内容）  
-- **OpenAlex**（抓取开放获取版本）  
-- **Crossref**（作为 OpenAlex 的备用方案）
+Supported sources:
+- Wiley Text & Data Mining API
+- Elsevier Text & Data Mining API
+- Springer Nature Open Access API (open access content only)
+- OpenAlex (open access copies)
+- Crossref (fallback when OpenAlex succeeds partially)
 
-下载结果按来源分类存放在 `downloads/pdfs/<publisher>/` 目录下，并会自动严格控制速率以满足各家 TDM 限制。
+Download throughput is automatically throttled to satisfy TDM rate limits.
 
-## 安装
+## Installation
 
 ```bash
 python -m venv .venv
-.venv\Scripts\activate  # Windows
+.venv\Scripts\activate
 pip install -e .
 ```
 
-## 配置
+## Configuration
 
-1. 将 Web of Science 导出的 `savedrecs.xls` 放在仓库根目录（或在运行时通过 `--savedrecs` 指定路径）。  
-2. 在 `.env` 或环境变量中提供所需凭证/联系方式：
-
+1. Export `savedrecs.xls` from Web of Science and place it in the project root (or pass a
+   custom path via `--savedrecs`).
+2. Provide the required credentials/contact details via environment variables or `.env`:
    ```ini
    WILEY_TDM_TOKEN=...
    ELSEVIER_API_KEY=...
-   SPRINGER_API_KEY=...          # 可选，仅下载开放获取条目
+   SPRINGER_API_KEY=...        # optional, only used for open-access items
    CROSSREF_MAILTO=you@example.com
    OPENALEX_MAILTO=you@example.com
    ```
+   - Missing credentials simply exclude the corresponding publisher.
+   - At least one `mailto` is required for Crossref/OpenAlex (polite requests policy).
+   - Springer returns open access records only; paywalled content still needs manual access.
 
-   - 如果缺少某个凭证，相关出版商的内容会被跳过。  
-   - Crossref/OpenAlex 至少需要一个 `mailto`（用于 polite requests）。OpenAlex 会优先使用，Crossref 仅在 OpenAlex 失败时作为备用。  
-   - Springer API 仅返回开放获取条目；非 OA 内容需通过机构授权或人工处理。
+The utility automatically reads the local `.env` file before resolving environment
+variables.
 
-工具默认会优先读取当前目录下的 `.env` 文件。
-
-## 使用
+## Usage
 
 ```bash
 python -m auto_paper_download --verbose
 ```
 
-常用参数：
+Common options:
+- `--savedrecs`: absolute or relative path to `savedrecs.xls`
+- `--output-dir`: destination root (defaults to `downloads/pdfs`)
+- `--max-per-publisher`: cap downloads per publisher, useful for smoke tests
+- `--delay`: seconds between requests (defaults to 1.5, enforced minimum 1.0)
+- `--overwrite`: re-download files even if they already exist
+- `--verbose`: emit debug logs for troubleshooting
 
-- `--savedrecs`：指定 `savedrecs.xls` 路径。
-- `--output-dir`：自定义下载目录（默认 `downloads/pdfs`）。
-- `--max-per-publisher`：限制每个出版商下载篇数，用于烟囱测试。
-- `--delay`：自定义下载间隔（默认 1.1s，最低 1.0s）。
-- `--overwrite`：即使文件已存在也重新下载。
-- `--verbose`：输出详细日志，便于排查失败原因。
+## Supplementary materials
 
-## 提示
+After a PDF finishes downloading, the tool fetches the DOI landing page, looks for
+supplement-related links (keywords such as "supplementary", "SI", "supporting
+information", etc.), and downloads only links that resolve to PDF files. Non-PDF assets
+are ignored so large datasets or archives are not pulled accidentally. Files are named
+safely and stored next to the article PDF.
 
-- 非开放获取的 Springer、ACS、RSC 等内容需要出版社提供 TDM 访问或在浏览器中手动获取。  
-- 如果遇到 403/Cloudflare 挑战，通常需要使用校内/白名单 IP 或联系出版社开通自动化访问。  
-- 可以通过日志快速定位失败原因，并根据需要扩展新的客户端。
+Because supplementary assets vary widely between publishers, the process is best effort:
+paywalls, JavaScript-driven pages, or unconventional link structures may prevent automatic
+collection. Warnings are logged when an SI download fails.
 
-## 测试
+## Tips
+
+- Non-open access content from Springer, ACS, RSC, and others still requires dedicated
+  TDM access or manual retrieval.
+- Frequent HTTP 403 / bot-detection responses often mean the publisher needs to safelist
+  your IP or issue additional credentials.
+- Examine the logs for the exact URL that failed when extending the downloader to new
+  publishers.
+
+## Testing
 
 ```bash
 pytest
 ```
+

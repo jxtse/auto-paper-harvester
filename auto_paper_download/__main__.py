@@ -18,7 +18,7 @@ LOGGER = logging.getLogger("auto_paper_download.cli")
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Download publisher PDFs listed in a Web of Science savedrecs.xls export."
+            "Download publisher PDFs and supplementary files listed in a Web of Science savedrecs.xls export."
         )
     )
     parser.add_argument(
@@ -31,7 +31,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--output-dir",
         type=Path,
         default=Path("downloads/pdfs"),
-        help="Directory where PDFs will be saved (defaults to downloads/pdfs).",
+        help="Directory where article folders (PDF + SI) will be saved (defaults to downloads/pdfs).",
     )
     parser.add_argument(
         "--delay",

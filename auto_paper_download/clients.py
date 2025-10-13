@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -10,9 +11,24 @@ import time
 import requests
 from requests.utils import parse_header_links
 
+from .supplements import download_supplements_for_doi
+
 LOGGER = logging.getLogger(__name__)
 
 DEFAULT_USER_AGENT = "AutoPaperDownload/0.1.0 (+https://github.com/ChemBioHTP/EnzyExtract)"
+
+_SAFE_PATH_CHARS = re.compile(r"[^0-9A-Za-z._-]+")
+
+
+def _safe_identifier(identifier: str) -> str:
+    """
+    Collapse characters that Windows filesystems reject into underscores, while preserving dots.
+    """
+    cleaned = _SAFE_PATH_CHARS.sub("_", identifier)
+    cleaned = cleaned.strip("._")
+    if not cleaned:
+        cleaned = "article"
+    return cleaned[:150]
 
 
 class DownloadError(RuntimeError):
@@ -760,6 +776,9 @@ def batched_download(
     """
     Download a batch of records, routing each entry to the appropriate publisher client.
     """
+    supplement_session = requests.Session()
+    supplement_session.headers.setdefault("User-Agent", DEFAULT_USER_AGENT)
+
     for record in records:
         publisher = (record.publisher or "").lower()
         try:
@@ -769,52 +788,89 @@ def batched_download(
                 identifier = record.doi or record.pii
                 if not identifier:
                     raise DownloadError(f"No DOI/PII for Elsevier record: {record}")
-                fname = identifier.replace("/", "_")
-                output_path = output_root / "elsevier" / f"{fname}.pdf"
-                yield elsevier_client.download_pdf(
+                fname = _safe_identifier(identifier)
+                article_dir = output_root / "elsevier" / fname
+                pdf_path = article_dir / "article.pdf"
+                pdf_path = elsevier_client.download_pdf(
                     doi=record.doi,
                     pii=record.pii,
-                    destination=output_path,
+                    destination=pdf_path,
                     overwrite=overwrite,
                 )
+                yield pdf_path
+                if record.doi:
+                    for supplemental in download_supplements_for_doi(
+                        doi=record.doi,
+                        destination_dir=article_dir,
+                        session=supplement_session,
+                        overwrite=overwrite,
+                    ):
+                        yield supplemental
             elif "wiley" in publisher:
                 if not wiley_client:
                     raise DownloadError("WileyClient missing for Wiley record.")
                 if not record.doi:
                     raise DownloadError(f"No DOI for Wiley record: {record}")
-                fname = record.doi.replace("/", "_")
-                output_path = output_root / "wiley" / f"{fname}.pdf"
-                yield wiley_client.download_pdf(
+                fname = _safe_identifier(record.doi)
+                article_dir = output_root / "wiley" / fname
+                pdf_path = article_dir / "article.pdf"
+                pdf_path = wiley_client.download_pdf(
                     doi=record.doi,
-                    destination=output_path,
+                    destination=pdf_path,
                     overwrite=overwrite,
                 )
+                yield pdf_path
+                for supplemental in download_supplements_for_doi(
+                    doi=record.doi,
+                    destination_dir=article_dir,
+                    session=supplement_session,
+                    overwrite=overwrite,
+                ):
+                    yield supplemental
             elif "springer" in publisher:
                 if not springer_client:
                     raise DownloadError("SpringerClient missing for Springer record.")
                 if not record.doi:
                     raise DownloadError(f"No DOI for Springer record: {record}")
-                fname = record.doi.replace("/", "_")
-                output_path = output_root / "springer" / f"{fname}.pdf"
-                yield springer_client.download_pdf(
+                fname = _safe_identifier(record.doi)
+                article_dir = output_root / "springer" / fname
+                pdf_path = article_dir / "article.pdf"
+                pdf_path = springer_client.download_pdf(
                     doi=record.doi,
-                    destination=output_path,
+                    destination=pdf_path,
                     overwrite=overwrite,
                 )
+                yield pdf_path
+                for supplemental in download_supplements_for_doi(
+                    doi=record.doi,
+                    destination_dir=article_dir,
+                    session=supplement_session,
+                    overwrite=overwrite,
+                ):
+                    yield supplemental
             elif "crossref" in publisher:
                 if not record.doi:
                     raise DownloadError(f"No DOI for Crossref record: {record}")
-                fname = record.doi.replace("/", "_")
+                fname = _safe_identifier(record.doi)
                 tried: list[Exception] = []
                 success = False
                 if openalex_client:
                     try:
-                        output_path = output_root / "openalex" / f"{fname}.pdf"
-                        yield openalex_client.download_pdf(
+                        article_dir = output_root / "openalex" / fname
+                        pdf_path = article_dir / "article.pdf"
+                        pdf_path = openalex_client.download_pdf(
                             doi=record.doi,
-                            destination=output_path,
+                            destination=pdf_path,
                             overwrite=overwrite,
                         )
+                        yield pdf_path
+                        for supplemental in download_supplements_for_doi(
+                            doi=record.doi,
+                            destination_dir=article_dir,
+                            session=supplement_session,
+                            overwrite=overwrite,
+                        ):
+                            yield supplemental
                         success = True
                     except Exception as exc:  # noqa: BLE001
                         LOGGER.debug(
@@ -825,12 +881,21 @@ def batched_download(
                         tried.append(exc)
                 if not success and crossref_client:
                     try:
-                        output_path = output_root / "crossref" / f"{fname}.pdf"
-                        yield crossref_client.download_pdf(
+                        article_dir = output_root / "crossref" / fname
+                        pdf_path = article_dir / "article.pdf"
+                        pdf_path = crossref_client.download_pdf(
                             doi=record.doi,
-                            destination=output_path,
+                            destination=pdf_path,
                             overwrite=overwrite,
                         )
+                        yield pdf_path
+                        for supplemental in download_supplements_for_doi(
+                            doi=record.doi,
+                            destination_dir=article_dir,
+                            session=supplement_session,
+                            overwrite=overwrite,
+                        ):
+                            yield supplemental
                         success = True
                     except Exception as exc:  # noqa: BLE001
                         LOGGER.debug(

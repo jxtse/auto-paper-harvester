@@ -1,5 +1,5 @@
 """
-Core helpers for extracting DOIs from Web of Science exports and downloading PDFs.
+Core helpers for extracting DOIs from Web of Science exports and downloading PDFs plus SI assets.
 """
 
 from __future__ import annotations
@@ -120,7 +120,7 @@ def download_from_savedrecs(
     overwrite: bool = False,
 ) -> Iterator[Path]:
     """
-    Download PDFs referenced in ``savedrecs.xls`` while honoring publisher rate limits.
+    Download PDFs (and any discoverable SI files) referenced in ``savedrecs.xls`` while honoring publisher rate limits.
     """
     load_env_file()
     dois = extract_dois(savedrecs)
