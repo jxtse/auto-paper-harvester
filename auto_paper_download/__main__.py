@@ -49,6 +49,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Re-download PDFs even if they already exist.",
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Inspect configuration and DOIs without downloading any files.",
+    )
     parser.add_argument("--verbose", action="store_true", help="Enable debug logging.")
     return parser
 
@@ -85,11 +90,16 @@ def main(argv: list[str] | None = None) -> None:
                 delay_seconds=args.delay,
                 max_per_publisher=args.max_per_publisher,
                 overwrite=args.overwrite,
+                dry_run=args.dry_run,
             )
         )
     except DownloadError as exc:
         LOGGER.error("Download aborted: %s", exc)
         raise SystemExit(1) from exc
+
+    if args.dry_run:
+        LOGGER.info("Dry run finished; no files were downloaded.")
+        return
 
     _log_success(downloads)
 

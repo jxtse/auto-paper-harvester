@@ -7,6 +7,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+from collections import Counter
 from pathlib import Path
 from typing import Iterable, Iterator, Optional
 
@@ -30,12 +31,14 @@ SPRINGER_PREFIXES = ("10.1007", "10.1038", "10.1186")
 DEFAULT_DELAY_SECONDS = 1.5  # respect the 1 PDF/sec cap with a small safety margin
 
 
-def load_env_file(path: Path | str = ".env") -> None:
+def load_env_file(path: Path | str = ".env") -> bool:
     """Populate ``os.environ`` with key/value pairs from a dotenv-style file."""
     env_path = Path(path)
     if not env_path.exists():
-        return
+        LOGGER.debug("No .env file found at %s", env_path)
+        return False
 
+    loaded = 0
     for raw_line in env_path.read_text(encoding="utf-8").splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#") or "=" not in line:
@@ -45,6 +48,13 @@ def load_env_file(path: Path | str = ".env") -> None:
         value = value.strip().strip("'\"")
         if key and value and key not in os.environ:
             os.environ[key] = value
+            loaded += 1
+
+    if loaded:
+        LOGGER.info("Loaded %d environment variables from %s", loaded, env_path)
+    else:
+        LOGGER.debug("No new environment variables loaded from %s", env_path)
+    return True
 
 
 def extract_dois(savedrecs_path: Path) -> list[str]:
@@ -118,9 +128,13 @@ def download_from_savedrecs(
     delay_seconds: float = DEFAULT_DELAY_SECONDS,
     max_per_publisher: int | None = None,
     overwrite: bool = False,
+    dry_run: bool = False,
 ) -> Iterator[Path]:
     """
     Download PDFs (and any discoverable SI files) referenced in ``savedrecs.xls`` while honoring publisher rate limits.
+
+    When ``dry_run`` is ``True``, the function only reports on the detected DOIs and
+    which publishers are configured, without attempting any downloads.
     """
     load_env_file()
     dois = extract_dois(savedrecs)
@@ -137,48 +151,88 @@ def download_from_savedrecs(
         )
         return iter(())
 
-    count_wiley = sum(1 for rec in records if rec.publisher == "Wiley")
-    count_elsevier = sum(1 for rec in records if rec.publisher == "Elsevier")
-    count_springer = sum(1 for rec in records if rec.publisher == "Springer")
-    count_crossref = sum(1 for rec in records if rec.publisher == "Crossref")
+    disabled_publishers: list[str] = []
+
+    def has_records(publisher_name: str) -> bool:
+        return any(rec.publisher == publisher_name for rec in records)
+
+    def disable_publisher(publisher_name: str, reason: str) -> None:
+        nonlocal records
+        LOGGER.warning("%s downloads disabled: %s", publisher_name, reason)
+        disabled_publishers.append(f"{publisher_name}: {reason}")
+        records = [rec for rec in records if rec.publisher != publisher_name]
+
+    wiley_client: Optional[WileyClient] = None
+    if has_records("Wiley"):
+        try:
+            wiley_client = WileyClient()
+        except ValueError as exc:
+            disable_publisher("Wiley", str(exc))
+
+    elsevier_client: Optional[ElsevierClient] = None
+    if has_records("Elsevier"):
+        try:
+            elsevier_client = ElsevierClient()
+        except ValueError as exc:
+            disable_publisher("Elsevier", str(exc))
+
+    springer_client: Optional[SpringerClient] = None
+    if has_records("Springer"):
+        try:
+            springer_client = SpringerClient()
+        except ValueError as exc:
+            disable_publisher("Springer", str(exc))
 
     crossref_client: Optional[CrossrefClient] = None
     openalex_client: Optional[OpenAlexClient] = None
-    if count_crossref:
+    if has_records("Crossref"):
+        crossref_error: Optional[str] = None
+        openalex_error: Optional[str] = None
         try:
             crossref_client = CrossrefClient()
         except ValueError as exc:
+            crossref_error = str(exc)
             LOGGER.warning("Crossref downloads disabled: %s", exc)
         try:
             openalex_client = OpenAlexClient()
         except ValueError as exc:
+            openalex_error = str(exc)
             LOGGER.warning("OpenAlex downloads disabled: %s", exc)
         if not crossref_client and not openalex_client:
-            LOGGER.warning(
-                "No Crossref/OpenAlex configuration available; skipping %d general DOIs.",
-                count_crossref,
-            )
-            records = [rec for rec in records if rec.publisher != "Crossref"]
-            count_crossref = 0
-            if not records:
-                LOGGER.warning(
-                    "No Wiley, Elsevier, or Springer DOIs detected in %s after removing unhandled entries",
-                    savedrecs,
-                )
-                return iter(())
+            reason_parts = [part for part in (crossref_error, openalex_error) if part]
+            reason = "; ".join(reason_parts) or "no Crossref/OpenAlex credentials available"
+            disable_publisher("Crossref", reason)
 
-    wiley_client = WileyClient() if count_wiley else None
-    elsevier_client = ElsevierClient() if count_elsevier else None
-    springer_client = SpringerClient() if count_springer else None
+    if not records:
+        LOGGER.warning(
+            "No Wiley, Elsevier, Springer, or Crossref DOIs remain after applying configuration checks."
+        )
+        return iter(())
+
+    counts = Counter(rec.publisher for rec in records if rec.publisher)
+    total_planned = sum(counts.values())
+    LOGGER.info(
+        "Download plan: %d total DOIs (%s)",
+        total_planned,
+        ", ".join(f"{publisher}={counts[publisher]}" for publisher in sorted(counts)),
+    )
+    if disabled_publishers:
+        LOGGER.info(
+            "Publishers skipped due to configuration issues: %s",
+            "; ".join(disabled_publishers),
+        )
+
+    sample_dois = [rec.doi for rec in records if rec.doi][:5]
+    if sample_dois:
+        suffix = "..." if len(records) > len(sample_dois) else ""
+        LOGGER.info("Example DOIs queued: %s%s", ", ".join(sample_dois), suffix)
+
+    if dry_run:
+        LOGGER.info("Dry run requested; skipping all download attempts.")
+        return iter(())
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    LOGGER.info(
-        "Starting downloads: %d Wiley, %d Elsevier, %d Springer, %d Crossref",
-        count_wiley,
-        count_elsevier,
-        count_springer,
-        count_crossref,
-    )
+    LOGGER.info("Beginning downloads; files will be stored in %s", output_dir)
 
     enforced_delay = max(delay_seconds, 1.0)
     if enforced_delay > delay_seconds:

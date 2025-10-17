@@ -16,6 +16,24 @@ Supported sources:
 
 Download throughput is automatically throttled to satisfy TDM rate limits.
 
+## Quick start
+
+1. Clone the repository and create a virtual environment:
+   ```bash
+   python -m venv .venv
+   .venv\Scripts\activate   # use `source .venv/bin/activate` on macOS/Linux
+   pip install -e .
+   ```
+2. Copy `.env.example` to `.env` and fill in the credentials you have available.
+3. Export your Web of Science list as `savedrecs.xls` and place it next to this README.
+4. Run a configuration check before downloading:
+   ```bash
+   auto-paper-download --dry-run --verbose
+   ```
+   The dry run logs how many DOIs were detected, which publishers are enabled, and
+   sample identifiers without downloading anything.
+5. Drop the `--dry-run` flag once the summary looks right.
+
 ## Installation
 
 ```bash
@@ -39,6 +57,7 @@ pip install -e .
    - Missing credentials simply exclude the corresponding publisher.
    - At least one `mailto` is required for Crossref/OpenAlex (polite requests policy).
    - Springer returns open access records only; paywalled content still needs manual access.
+   - Credentials are optional—any publisher without configuration is skipped with an explanatory log message.
 
 The utility automatically reads the local `.env` file before resolving environment
 variables.
@@ -55,7 +74,12 @@ Common options:
 - `--max-per-publisher`: cap downloads per publisher, useful for smoke tests
 - `--delay`: seconds between requests (defaults to 1.5, enforced minimum 1.0)
 - `--overwrite`: re-download files even if they already exist
+- `--dry-run`: inspect the detected DOIs and publisher configuration without downloading
 - `--verbose`: emit debug logs for troubleshooting
+
+During a normal run the tool prints a download plan indicating how many DOIs will be
+fetched per publisher. Missing credentials or API keys are reported and the associated
+publishers are skipped instead of aborting the session.
 
 ## Supplementary materials
 
