@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, Iterator, Optional, Sequence
+from typing import Iterable, Iterator, MutableMapping, Optional, Sequence
 from urllib.parse import quote
 import time
 
@@ -16,6 +16,7 @@ from .supplements import download_supplements_for_doi
 LOGGER = logging.getLogger(__name__)
 
 DEFAULT_USER_AGENT = "AutoPaperDownload/0.1.0 (+https://github.com/ChemBioHTP/EnzyExtract)"
+DEFAULT_CROSSREF_REQUEST_DELAY = 2.0
 
 _SAFE_PATH_CHARS = re.compile(r"[^0-9A-Za-z._-]+")
 
@@ -44,6 +45,17 @@ def _article_destination(article_dir: Path, base_name: str) -> Path:
         except OSError:  # noqa: PERF203
             LOGGER.debug("Failed to rename legacy article.pdf: %s", legacy, exc_info=True)
     return destination
+
+
+def _cleanup_article_dir(article_dir: Path) -> None:
+    """
+    Remove ``article_dir`` if it exists and contains no files after a failed download.
+    """
+    try:
+        if article_dir.is_dir() and not any(article_dir.iterdir()):
+            article_dir.rmdir()
+    except OSError:  # noqa: PERF203
+        LOGGER.debug("Failed to remove empty article directory: %s", article_dir, exc_info=True)
 
 
 class DownloadError(RuntimeError):
@@ -351,6 +363,7 @@ class CrossrefClient:
         license_safelist: Optional[Sequence[str]] = None,
         session: Optional[requests.Session] = None,
         user_agent: str = DEFAULT_USER_AGENT,
+        request_delay: Optional[float] = None,
     ) -> None:
         mailto = mailto or os.getenv("CROSSREF_MAILTO")
         if not mailto:
@@ -376,6 +389,16 @@ class CrossrefClient:
                 "Accept": "application/json",
             }
         )
+        delay_env = os.getenv("CROSSREF_REQUEST_DELAY")
+        delay_value = request_delay
+        if delay_env:
+            try:
+                delay_value = float(delay_env)
+            except ValueError:
+                LOGGER.debug("Invalid CROSSREF_REQUEST_DELAY value %s; ignoring.", delay_env)
+        if delay_value is None:
+            delay_value = DEFAULT_CROSSREF_REQUEST_DELAY
+        self._request_delay = max(delay_value, 0.0)
 
     def download_pdf(
         self,
@@ -405,13 +428,15 @@ class CrossrefClient:
 
         destination.parent.mkdir(parents=True, exist_ok=True)
         LOGGER.debug("Crossref download: %s -> %s", pdf_url, destination)
+        self._throttle()
         response = self._session.get(
             pdf_url, headers={"Accept": "application/pdf"}, timeout=120, stream=True
         )
         if response.status_code != requests.codes.ok:
-            raise DownloadError(
-                f"Crossref download failed ({response.status_code}): {response.text}"
-            )
+            message = f"Crossref download failed ({response.status_code}) for DOI {doi}"
+            if response.status_code == 403 and "Just a moment" in (response.text or ""):
+                message = f"Crossref download blocked by Cloudflare (403) for DOI {doi}"
+            raise DownloadError(message)
 
         with destination.open("wb") as fout:
             for chunk in response.iter_content(chunk_size=65536):
@@ -423,11 +448,13 @@ class CrossrefClient:
         url = self.WORK_URL_TEMPLATE.format(doi=doi)
         params = {"mailto": self._mailto}
         LOGGER.debug("Crossref metadata lookup %s params=%s", url, params)
+        self._throttle()
         response = self._session.get(url, params=params, timeout=60)
         if response.status_code != requests.codes.ok:
-            raise DownloadError(
-                f"Crossref metadata lookup failed ({response.status_code}): {response.text}"
-            )
+            message = f"Crossref metadata lookup failed ({response.status_code}) for DOI {doi}"
+            if response.status_code == 403 and "Just a moment" in (response.text or ""):
+                message = f"Crossref metadata lookup blocked by Cloudflare (403) for DOI {doi}"
+            raise DownloadError(message)
         payload = response.json()
         return payload.get("message", {})
 
@@ -503,6 +530,7 @@ class CrossrefClient:
         headers = {"Accept": self.UNIXSD_ACCEPT}
         LOGGER.debug("Crossref link header lookup %s", url)
         try:
+            self._throttle()
             response = self._session.head(
                 url, headers=headers, timeout=30, allow_redirects=True
             )
@@ -524,6 +552,10 @@ class CrossrefClient:
             if (entry.get("type") or "").lower() == "application/pdf"
         ]
         return pdf_links[0] if pdf_links else None
+
+    def _throttle(self) -> None:
+        if self._request_delay > 0:
+            time.sleep(self._request_delay)
 
 
 class OpenAlexClient:
@@ -787,6 +819,7 @@ def batched_download(
     overwrite: bool = False,
     delay_seconds: Optional[float] = None,
     raise_on_error: bool = True,
+    metrics: Optional[MutableMapping[str, dict[str, int]]] = None,
 ) -> Iterator[Path]:
     """
     Download a batch of records, routing each entry to the appropriate publisher client.
@@ -796,6 +829,15 @@ def batched_download(
 
     for record in records:
         publisher = (record.publisher or "").lower()
+        publisher_label = record.publisher or "Unknown"
+        metrics_entry: Optional[dict[str, int]] = None
+        if metrics is not None:
+            metrics_entry = metrics.setdefault(
+                publisher_label, {"attempted": 0, "succeeded": 0}
+            )
+            metrics_entry["attempted"] += 1
+        article_dir: Optional[Path] = None
+        pdf_downloaded = False
         try:
             if "elsevier" in publisher:
                 if not elsevier_client:
@@ -804,7 +846,7 @@ def batched_download(
                 if not identifier:
                     raise DownloadError(f"No DOI/PII for Elsevier record: {record}")
                 fname = _safe_identifier(identifier)
-                article_dir = output_root / "elsevier" / fname
+                article_dir = output_root / fname
                 pdf_path = _article_destination(article_dir, fname)
                 pdf_path = elsevier_client.download_pdf(
                     doi=record.doi,
@@ -812,6 +854,7 @@ def batched_download(
                     destination=pdf_path,
                     overwrite=overwrite,
                 )
+                pdf_downloaded = True
                 yield pdf_path
                 if record.doi:
                     for supplemental in download_supplements_for_doi(
@@ -819,6 +862,7 @@ def batched_download(
                         destination_dir=article_dir,
                         session=supplement_session,
                         overwrite=overwrite,
+                        publisher=record.publisher,
                     ):
                         yield supplemental
             elif "wiley" in publisher:
@@ -827,19 +871,21 @@ def batched_download(
                 if not record.doi:
                     raise DownloadError(f"No DOI for Wiley record: {record}")
                 fname = _safe_identifier(record.doi)
-                article_dir = output_root / "wiley" / fname
+                article_dir = output_root / fname
                 pdf_path = _article_destination(article_dir, fname)
                 pdf_path = wiley_client.download_pdf(
                     doi=record.doi,
                     destination=pdf_path,
                     overwrite=overwrite,
                 )
+                pdf_downloaded = True
                 yield pdf_path
                 for supplemental in download_supplements_for_doi(
                     doi=record.doi,
                     destination_dir=article_dir,
                     session=supplement_session,
                     overwrite=overwrite,
+                    publisher=record.publisher,
                 ):
                     yield supplemental
             elif "springer" in publisher:
@@ -848,42 +894,56 @@ def batched_download(
                 if not record.doi:
                     raise DownloadError(f"No DOI for Springer record: {record}")
                 fname = _safe_identifier(record.doi)
-                article_dir = output_root / "springer" / fname
+                article_dir = output_root / fname
                 pdf_path = _article_destination(article_dir, fname)
-                pdf_path = springer_client.download_pdf(
-                    doi=record.doi,
-                    destination=pdf_path,
-                    overwrite=overwrite,
-                )
+                try:
+                    pdf_path = springer_client.download_pdf(
+                        doi=record.doi,
+                        destination=pdf_path,
+                        overwrite=overwrite,
+                    )
+                except DownloadError as exc:
+                    message = str(exc).lower()
+                    if "metadata not found" in message or "download failed (403" in message:
+                        LOGGER.info(
+                            "Springer DOI %s 跳过：需订阅访问，手动登录后再获取 PDF。", record.doi
+                        )
+                        _cleanup_article_dir(article_dir)
+                        continue
+                    raise
+                pdf_downloaded = True
                 yield pdf_path
                 for supplemental in download_supplements_for_doi(
                     doi=record.doi,
                     destination_dir=article_dir,
                     session=supplement_session,
                     overwrite=overwrite,
+                    publisher=record.publisher,
                 ):
                     yield supplemental
             elif "crossref" in publisher:
                 if not record.doi:
                     raise DownloadError(f"No DOI for Crossref record: {record}")
                 fname = _safe_identifier(record.doi)
+                article_dir = output_root / fname
                 tried: list[Exception] = []
                 success = False
                 if openalex_client:
                     try:
-                        article_dir = output_root / "openalex" / fname
                         pdf_path = _article_destination(article_dir, fname)
                         pdf_path = openalex_client.download_pdf(
                             doi=record.doi,
                             destination=pdf_path,
                             overwrite=overwrite,
                         )
+                        pdf_downloaded = True
                         yield pdf_path
                         for supplemental in download_supplements_for_doi(
                             doi=record.doi,
                             destination_dir=article_dir,
                             session=supplement_session,
                             overwrite=overwrite,
+                            publisher=record.publisher,
                         ):
                             yield supplemental
                         success = True
@@ -896,19 +956,20 @@ def batched_download(
                         tried.append(exc)
                 if not success and crossref_client:
                     try:
-                        article_dir = output_root / "crossref" / fname
                         pdf_path = _article_destination(article_dir, fname)
                         pdf_path = crossref_client.download_pdf(
                             doi=record.doi,
                             destination=pdf_path,
                             overwrite=overwrite,
                         )
+                        pdf_downloaded = True
                         yield pdf_path
                         for supplemental in download_supplements_for_doi(
                             doi=record.doi,
                             destination_dir=article_dir,
                             session=supplement_session,
                             overwrite=overwrite,
+                            publisher=record.publisher,
                         ):
                             yield supplemental
                         success = True
@@ -929,9 +990,23 @@ def batched_download(
                 raise DownloadError(
                     f"Unsupported publisher for record {record.publisher}: {record.title}"
                 )
+            if metrics_entry and pdf_downloaded:
+                metrics_entry["succeeded"] += 1
             if delay_seconds:
                 time.sleep(delay_seconds)
         except Exception as exc:  # noqa: BLE001
+            if article_dir:
+                _cleanup_article_dir(article_dir)
+            if isinstance(exc, DownloadError):
+                LOGGER.warning(
+                    "Skipping %s (%s)：%s",
+                    record.doi or record.title,
+                    record.publisher,
+                    exc,
+                )
+                if raise_on_error:
+                    raise
+                continue
             LOGGER.exception("Failed to download %s (%s)", record.title, record.publisher)
             if raise_on_error:
                 raise

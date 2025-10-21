@@ -241,8 +241,9 @@ def download_from_savedrecs(
             delay_seconds,
             enforced_delay,
         )
+    metrics: dict[str, dict[str, int]] = {}
     try:
-        return batched_download(
+        generator = batched_download(
             records=records,
             output_root=output_dir,
             elsevier_client=elsevier_client,
@@ -253,7 +254,21 @@ def download_from_savedrecs(
             overwrite=overwrite,
             delay_seconds=enforced_delay,
             raise_on_error=False,
+            metrics=metrics,
         )
     except DownloadError as exc:
         LOGGER.error("Publisher download failed: %s", exc)
         raise
+
+    class DownloadStream(Iterator[Path]):
+        def __init__(self, iterator: Iterator[Path], stats: dict[str, dict[str, int]]):
+            self._iterator = iterator
+            self.metrics = stats
+
+        def __iter__(self) -> "DownloadStream":
+            return self
+
+        def __next__(self) -> Path:
+            return next(self._iterator)
+
+    return DownloadStream(generator, metrics)

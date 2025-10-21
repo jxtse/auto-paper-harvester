@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+from collections import defaultdict
 from pathlib import Path
 from typing import Iterable
 
@@ -24,8 +25,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--savedrecs",
         type=Path,
-        default=Path("savedrecs.xls"),
-        help="Path to the savedrecs.xls file (defaults to ./savedrecs.xls).",
+        nargs="+",
+        default=[Path("savedrecs.xls")],
+        help=(
+            "One or more Web of Science exports to load (defaults to ./savedrecs.xls). "
+            "Provide multiple paths to combine downloads."
+        ),
     )
     parser.add_argument(
         "--output-dir",
@@ -66,6 +71,30 @@ def _log_success(paths: Iterable[Path]) -> None:
         LOGGER.info("No PDFs downloaded.")
 
 
+def _log_publisher_summary(metrics: dict[str, dict[str, int]]) -> None:
+    attempted = [
+        (publisher, stats)
+        for publisher, stats in metrics.items()
+        if stats.get("attempted", 0)
+    ]
+    if not attempted:
+        LOGGER.info("No publisher downloads were attempted; skipping summary.")
+        return
+
+    LOGGER.info("Publisher PDF download summary:")
+    for publisher, stats in sorted(attempted, key=lambda item: item[0].lower()):
+        total_attempted = stats.get("attempted", 0)
+        succeeded = stats.get("succeeded", 0)
+        rate = (succeeded / total_attempted * 100) if total_attempted else 0.0
+        LOGGER.info(
+            "  %s: %d/%d PDFs succeeded (%.1f%%)",
+            publisher,
+            succeeded,
+            total_attempted,
+            rate,
+        )
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -78,13 +107,20 @@ def main(argv: list[str] | None = None) -> None:
     if args.delay < 0:
         raise SystemExit("Delay must be non-negative.")
 
-    savedrecs_path: Path = args.savedrecs
-    if not savedrecs_path.exists():
-        raise SystemExit(f"savedrecs.xls file not found: {savedrecs_path}")
+    savedrecs_paths = list(args.savedrecs)
+    missing = [str(path) for path in savedrecs_paths if not path.exists()]
+    if missing:
+        joined = ", ".join(missing)
+        raise SystemExit(f"savedrecs input file(s) not found: {joined}")
 
+    downloads: list[Path] = []
+    aggregate_metrics: defaultdict[str, dict[str, int]] = defaultdict(
+        lambda: {"attempted": 0, "succeeded": 0}
+    )
     try:
-        downloads = list(
-            download_from_savedrecs(
+        for savedrecs_path in savedrecs_paths:
+            LOGGER.info("Processing input file %s", savedrecs_path)
+            download_iter = download_from_savedrecs(
                 savedrecs=savedrecs_path,
                 output_dir=args.output_dir,
                 delay_seconds=args.delay,
@@ -92,7 +128,14 @@ def main(argv: list[str] | None = None) -> None:
                 overwrite=args.overwrite,
                 dry_run=args.dry_run,
             )
-        )
+            downloaded_paths = list(download_iter)
+            downloads.extend(downloaded_paths)
+            iter_metrics = getattr(download_iter, "metrics", None)
+            if iter_metrics:
+                for publisher, stats in iter_metrics.items():
+                    entry = aggregate_metrics[publisher]
+                    entry["attempted"] += stats.get("attempted", 0)
+                    entry["succeeded"] += stats.get("succeeded", 0)
     except DownloadError as exc:
         LOGGER.error("Download aborted: %s", exc)
         raise SystemExit(1) from exc
@@ -102,6 +145,7 @@ def main(argv: list[str] | None = None) -> None:
         return
 
     _log_success(downloads)
+    _log_publisher_summary(aggregate_metrics)
 
 
 if __name__ == "__main__":

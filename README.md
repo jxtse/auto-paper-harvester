@@ -1,10 +1,10 @@
-﻿# Auto Paper Download
+﻿# Auto Paper Harvester
 
-`auto-paper-download` is a command line helper that parses Web of Science `savedrecs.xls`
+This is a command line helper that parses Web of Science `savedrecs.xls`
 exports, identifies DOIs, selects the appropriate publisher interface, and downloads the
 article PDF together with any Supplementary Information (SI) assets that can be detected
 on the landing page. Each article ends up in
-`downloads/pdfs/<publisher>/<doi-slug>/` with the main PDF named after the DOI slug,
+`downloads/pdfs/<doi-slug>/` with the main PDF named after the DOI slug,
 plus any SI files located during scraping.
 
 Supported sources:
@@ -20,7 +20,8 @@ Download throughput is automatically throttled to satisfy TDM rate limits.
 
 1. Clone the repository and create a virtual environment:
    ```bash
-   python -m venv .venv
+   pip install uv
+   uv venv
    .venv\Scripts\activate   # use `source .venv/bin/activate` on macOS/Linux
    pip install -e .
    ```
@@ -69,7 +70,7 @@ python -m auto_paper_download --verbose
 ```
 
 Common options:
-- `--savedrecs`: absolute or relative path to `savedrecs.xls`
+- `--savedrecs`: one or more absolute or relative paths to Web of Science exports (defaults to `savedrecs.xls`)
 - `--output-dir`: destination root (defaults to `downloads/pdfs`)
 - `--max-per-publisher`: cap downloads per publisher, useful for smoke tests
 - `--delay`: seconds between requests (defaults to 1.5, enforced minimum 1.0)
@@ -80,6 +81,9 @@ Common options:
 During a normal run the tool prints a download plan indicating how many DOIs will be
 fetched per publisher. Missing credentials or API keys are reported and the associated
 publishers are skipped instead of aborting the session.
+
+After the downloads finish, the CLI reports how many PDFs succeeded per publisher together
+with the corresponding success rate.
 
 ## Supplementary materials
 

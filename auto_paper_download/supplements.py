@@ -44,11 +44,16 @@ def download_supplements_for_doi(
     overwrite: bool = False,
     max_links: int = 10,
     user_agent: Optional[str] = None,
+    publisher: Optional[str] = None,
 ) -> list[Path]:
     """
     Attempt to discover and download supplementary assets linked from a DOI landing page.
 
     Returns the list of downloaded file paths (empty if nothing was found).
+
+    When ``publisher`` is provided, the function can apply publisher-specific handling—for
+    example, Wiley landing pages that require authentication report a friendly message and
+    skip supplementary downloads.
     """
     if not doi:
         return []
@@ -72,6 +77,9 @@ def download_supplements_for_doi(
         return []
 
     if response.status_code >= 400:
+        if response.status_code == 403 and publisher and publisher.lower() == "wiley":
+            LOGGER.info("Wiley supplementary download skipped for %s: 受限，需要手动登录", doi)
+            return []
         LOGGER.warning(
             "DOI landing page lookup failed for %s (%s)", doi, response.status_code
         )
