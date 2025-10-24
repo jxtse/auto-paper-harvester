@@ -17,6 +17,7 @@ from .clients import (
     ElsevierClient,
     CrossrefClient,
     OpenAlexClient,
+    UnpaywallClient,
     SpringerClient,
     WileyClient,
     batched_download,
@@ -203,6 +204,12 @@ def download_from_savedrecs(
             reason = "; ".join(reason_parts) or "no Crossref/OpenAlex credentials available"
             disable_publisher("Crossref", reason)
 
+    unpaywall_client: Optional[UnpaywallClient] = None
+    try:
+        unpaywall_client = UnpaywallClient()
+    except ValueError as exc:
+        LOGGER.debug("Unpaywall fallback unavailable: %s", exc)
+
     if not records:
         LOGGER.warning(
             "No Wiley, Elsevier, Springer, or Crossref DOIs remain after applying configuration checks."
@@ -249,6 +256,7 @@ def download_from_savedrecs(
             elsevier_client=elsevier_client,
             crossref_client=crossref_client,
             openalex_client=openalex_client,
+            unpaywall_client=unpaywall_client,
             springer_client=springer_client,
             wiley_client=wiley_client,
             overwrite=overwrite,

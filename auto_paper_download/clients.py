@@ -16,9 +16,26 @@ from .supplements import download_supplements_for_doi
 LOGGER = logging.getLogger(__name__)
 
 DEFAULT_USER_AGENT = "AutoPaperDownload/0.1.0 (+https://github.com/ChemBioHTP/EnzyExtract)"
-DEFAULT_CROSSREF_REQUEST_DELAY = 2.0
+DEFAULT_CROSSREF_REQUEST_DELAY = 4.0
+DEFAULT_WILEY_REQUEST_DELAY = 2.5
 
 _SAFE_PATH_CHARS = re.compile(r"[^0-9A-Za-z._-]+")
+
+
+def _response_preview(response: requests.Response, *, limit: int = 160) -> str:
+    """
+    Return a short, whitespace-collapsed preview of an HTTP response body for logging.
+    """
+    if response is None:
+        return ""
+    try:
+        text = response.text or ""
+    except Exception:  # noqa: BLE001
+        text = ""
+    text = " ".join(text.split())
+    if len(text) > limit:
+        text = f"{text[:limit].rstrip()}..."
+    return text
 
 
 def _safe_identifier(identifier: str) -> str:
@@ -111,6 +128,17 @@ class WileyClient:
             }
         )
 
+        delay_env = os.getenv("WILEY_REQUEST_DELAY")
+        delay_value = None
+        if delay_env:
+            try:
+                delay_value = float(delay_env)
+            except ValueError:
+                LOGGER.debug("Invalid WILEY_REQUEST_DELAY value %s; ignoring.", delay_env)
+        if delay_value is None:
+            delay_value = DEFAULT_WILEY_REQUEST_DELAY
+        self._request_delay = max(delay_value, 0.0)
+
     def search(
         self,
         *,
@@ -139,10 +167,11 @@ class WileyClient:
 
         url = f"{self.BASE_URL}/articles"
         LOGGER.debug("Wiley search: %s params=%s", url, params)
+        self._throttle()
         response = self._session.get(url, params=params, timeout=60)
         if response.status_code != requests.codes.ok:
             raise DownloadError(
-                f"Wiley search failed ({response.status_code}): {response.text}"
+                f"Wiley search failed ({response.status_code}): {_response_preview(response)}"
             )
 
         payload = response.json()
@@ -183,10 +212,11 @@ class WileyClient:
         url = f"{self.BASE_URL}/articles/{doi}"
         LOGGER.debug("Wiley download: %s -> %s", url, destination)
         headers = {"Accept": "application/pdf"}
+        self._throttle()
         response = self._session.get(url, headers=headers, timeout=120, stream=True)
         if response.status_code != requests.codes.ok:
             raise DownloadError(
-                f"Wiley download failed ({response.status_code}): {response.text}"
+                f"Wiley download failed ({response.status_code}): {_response_preview(response)}"
             )
 
         with destination.open("wb") as fout:
@@ -194,6 +224,10 @@ class WileyClient:
                 if chunk:
                     fout.write(chunk)
         return destination
+
+    def _throttle(self) -> None:
+        if self._request_delay > 0:
+            time.sleep(self._request_delay)
 
 
 class SpringerClient:
@@ -257,7 +291,7 @@ class SpringerClient:
             response = self._session.get(self.OPENACCESS_URL, params=params, timeout=60)
         if response.status_code != requests.codes.ok:
             raise DownloadError(
-                f"Springer search failed ({response.status_code}): {response.text}"
+                f"Springer search failed ({response.status_code}): {_response_preview(response)}"
             )
 
         payload = response.json()
@@ -301,7 +335,7 @@ class SpringerClient:
         )
         if response.status_code != requests.codes.ok:
             raise DownloadError(
-                f"Springer download failed ({response.status_code}): {response.text}"
+                f"Springer download failed ({response.status_code}): {_response_preview(response)}"
             )
 
         with destination.open("wb") as fout:
@@ -319,7 +353,7 @@ class SpringerClient:
             response = self._session.get(self.OPENACCESS_URL, params=params, timeout=60)
         if response.status_code != requests.codes.ok:
             raise DownloadError(
-                f"Springer metadata lookup failed ({response.status_code}): {response.text}"
+                f"Springer metadata lookup failed ({response.status_code}): {_response_preview(response)}"
             )
         payload = response.json()
         records = payload.get("records", [])
@@ -433,9 +467,14 @@ class CrossrefClient:
             pdf_url, headers={"Accept": "application/pdf"}, timeout=120, stream=True
         )
         if response.status_code != requests.codes.ok:
-            message = f"Crossref download failed ({response.status_code}) for DOI {doi}"
-            if response.status_code == 403 and "Just a moment" in (response.text or ""):
+            body_text = response.text or ""
+            if response.status_code == 403 and "Just a moment" in body_text:
                 message = f"Crossref download blocked by Cloudflare (403) for DOI {doi}"
+            else:
+                message = (
+                    f"Crossref download failed ({response.status_code}) for DOI {doi}: "
+                    f"{_response_preview(response)}"
+                )
             raise DownloadError(message)
 
         with destination.open("wb") as fout:
@@ -451,9 +490,14 @@ class CrossrefClient:
         self._throttle()
         response = self._session.get(url, params=params, timeout=60)
         if response.status_code != requests.codes.ok:
-            message = f"Crossref metadata lookup failed ({response.status_code}) for DOI {doi}"
-            if response.status_code == 403 and "Just a moment" in (response.text or ""):
+            body_text = response.text or ""
+            if response.status_code == 403 and "Just a moment" in body_text:
                 message = f"Crossref metadata lookup blocked by Cloudflare (403) for DOI {doi}"
+            else:
+                message = (
+                    f"Crossref metadata lookup failed ({response.status_code}) for DOI {doi}: "
+                    f"{_response_preview(response)}"
+                )
             raise DownloadError(message)
         payload = response.json()
         return payload.get("message", {})
@@ -558,6 +602,97 @@ class CrossrefClient:
             time.sleep(self._request_delay)
 
 
+class UnpaywallClient:
+    """
+    Minimal Unpaywall client used as a fallback when publisher/OpenAlex sources fail.
+
+    Documentation: https://unpaywall.org/products/api
+    """
+
+    BASE_URL = "https://api.unpaywall.org/v2/"
+
+    def __init__(
+        self,
+        *,
+        email: Optional[str] = None,
+        session: Optional[requests.Session] = None,
+        user_agent: str = DEFAULT_USER_AGENT,
+    ) -> None:
+        email = email or os.getenv("UNPAYWALL_EMAIL")
+        if not email:
+            raise ValueError(
+                "UnpaywallClient requires a contact email. "
+                "Set UNPAYWALL_EMAIL or pass email= explicitly."
+            )
+        self._email = email
+        self._session = session or requests.Session()
+        self._session.headers.update(
+            {
+                "User-Agent": user_agent,
+                "Accept": "application/json",
+            }
+        )
+
+    def download_pdf(
+        self,
+        *,
+        doi: str,
+        destination: Path,
+        overwrite: bool = False,
+    ) -> Path:
+        if not doi:
+            raise ValueError("UnpaywallClient.download_pdf requires a DOI.")
+
+        if destination.exists() and not overwrite:
+            LOGGER.info("Skipping existing file: %s", destination)
+            return destination
+
+        record = self._fetch_record(doi)
+        pdf_url = self._select_pdf_url(record)
+        if not pdf_url:
+            raise DownloadError(f"Unpaywall did not report an open-access PDF for DOI {doi}")
+
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        LOGGER.debug("Unpaywall download: %s -> %s", pdf_url, destination)
+        response = self._session.get(pdf_url, timeout=120, stream=True)
+        if response.status_code != requests.codes.ok:
+            raise DownloadError(
+                f"Unpaywall download failed ({response.status_code}) for DOI {doi}"
+            )
+
+        with destination.open("wb") as fout:
+            for chunk in response.iter_content(chunk_size=65536):
+                if chunk:
+                    fout.write(chunk)
+        return destination
+
+    def _fetch_record(self, doi: str) -> dict:
+        url = f"{self.BASE_URL}{quote(doi)}"
+        params = {"email": self._email}
+        LOGGER.debug("Unpaywall lookup %s params=%s", url, params)
+        response = self._session.get(url, params=params, timeout=60)
+        if response.status_code == 404:
+            raise DownloadError(f"Unpaywall has no record for DOI {doi}")
+        if response.status_code != requests.codes.ok:
+            raise DownloadError(
+                f"Unpaywall lookup failed ({response.status_code}) for DOI {doi}"
+            )
+        return response.json() or {}
+
+    @staticmethod
+    def _select_pdf_url(record: dict) -> Optional[str]:
+        best = record.get("best_oa_location") or {}
+        pdf_url = best.get("url_for_pdf")
+        if pdf_url:
+            return pdf_url
+        locations = record.get("oa_locations") or []
+        for entry in locations:
+            candidate = entry.get("url_for_pdf")
+            if candidate:
+                return candidate
+        return None
+
+
 class OpenAlexClient:
     """
     OpenAlex helper for retrieving open-access PDFs.
@@ -622,7 +757,7 @@ class OpenAlexClient:
         )
         if response.status_code != requests.codes.ok:
             raise DownloadError(
-                f"OpenAlex download failed ({response.status_code}): {response.text}"
+                f"OpenAlex download failed ({response.status_code}): {_response_preview(response)}"
             )
 
         with destination.open("wb") as fout:
@@ -639,7 +774,7 @@ class OpenAlexClient:
         response = self._session.get(url, params=params, timeout=60)
         if response.status_code != requests.codes.ok:
             raise DownloadError(
-                f"OpenAlex metadata lookup failed ({response.status_code}): {response.text}"
+                f"OpenAlex metadata lookup failed ({response.status_code}): {_response_preview(response)}"
             )
         return response.json()
 
@@ -736,7 +871,7 @@ class ElsevierClient:
         response = self._session.get(self.SEARCH_URL, params=params, timeout=60)
         if response.status_code != requests.codes.ok:
             raise DownloadError(
-                f"Elsevier search failed ({response.status_code}): {response.text}"
+                f"Elsevier search failed ({response.status_code}): {_response_preview(response)}"
             )
 
         payload = response.json()
@@ -797,7 +932,7 @@ class ElsevierClient:
         response = self._session.get(url, params=params, timeout=120, stream=True)
         if response.status_code != requests.codes.ok:
             raise DownloadError(
-                f"Elsevier download failed ({response.status_code}): {response.text}"
+                f"Elsevier download failed ({response.status_code}): {_response_preview(response)}"
             )
 
         with destination.open("wb") as fout:
@@ -814,6 +949,7 @@ def batched_download(
     elsevier_client: Optional[ElsevierClient] = None,
     crossref_client: Optional[CrossrefClient] = None,
     openalex_client: Optional[OpenAlexClient] = None,
+    unpaywall_client: Optional[UnpaywallClient] = None,
     springer_client: Optional[SpringerClient] = None,
     wiley_client: Optional[WileyClient] = None,
     overwrite: bool = False,
@@ -826,6 +962,21 @@ def batched_download(
     """
     supplement_session = requests.Session()
     supplement_session.headers.setdefault("User-Agent", DEFAULT_USER_AGENT)
+
+    def _attempt_unpaywall_download(
+        doi: str, destination: Path
+    ) -> Optional[Path]:
+        if not unpaywall_client or not doi:
+            return None
+        try:
+            return unpaywall_client.download_pdf(
+                doi=doi,
+                destination=destination,
+                overwrite=overwrite,
+            )
+        except DownloadError as exc:
+            LOGGER.debug("Unpaywall fallback failed for %s: %s", doi, exc)
+            return None
 
     for record in records:
         publisher = (record.publisher or "").lower()
@@ -848,12 +999,18 @@ def batched_download(
                 fname = _safe_identifier(identifier)
                 article_dir = output_root / fname
                 pdf_path = _article_destination(article_dir, fname)
-                pdf_path = elsevier_client.download_pdf(
-                    doi=record.doi,
-                    pii=record.pii,
-                    destination=pdf_path,
-                    overwrite=overwrite,
-                )
+                try:
+                    pdf_path = elsevier_client.download_pdf(
+                        doi=record.doi,
+                        pii=record.pii,
+                        destination=pdf_path,
+                        overwrite=overwrite,
+                    )
+                except DownloadError:
+                    fallback = _attempt_unpaywall_download(record.doi or "", pdf_path)
+                    if fallback is None:
+                        raise
+                    pdf_path = fallback
                 pdf_downloaded = True
                 yield pdf_path
                 if record.doi:
@@ -873,11 +1030,17 @@ def batched_download(
                 fname = _safe_identifier(record.doi)
                 article_dir = output_root / fname
                 pdf_path = _article_destination(article_dir, fname)
-                pdf_path = wiley_client.download_pdf(
-                    doi=record.doi,
-                    destination=pdf_path,
-                    overwrite=overwrite,
-                )
+                try:
+                    pdf_path = wiley_client.download_pdf(
+                        doi=record.doi,
+                        destination=pdf_path,
+                        overwrite=overwrite,
+                    )
+                except DownloadError:
+                    fallback = _attempt_unpaywall_download(record.doi, pdf_path)
+                    if fallback is None:
+                        raise
+                    pdf_path = fallback
                 pdf_downloaded = True
                 yield pdf_path
                 for supplemental in download_supplements_for_doi(
@@ -903,14 +1066,17 @@ def batched_download(
                         overwrite=overwrite,
                     )
                 except DownloadError as exc:
-                    message = str(exc).lower()
-                    if "metadata not found" in message or "download failed (403" in message:
-                        LOGGER.info(
-                            "Springer DOI %s 跳过：需订阅访问，手动登录后再获取 PDF。", record.doi
-                        )
-                        _cleanup_article_dir(article_dir)
-                        continue
-                    raise
+                    fallback = _attempt_unpaywall_download(record.doi, pdf_path)
+                    if fallback is None:
+                        message = str(exc).lower()
+                        if "metadata not found" in message or "download failed (403" in message:
+                            LOGGER.info(
+                                "Springer DOI %s 跳过：需订阅访问，手动登录后再获取 PDF。", record.doi
+                            )
+                            _cleanup_article_dir(article_dir)
+                            continue
+                        raise
+                    pdf_path = fallback
                 pdf_downloaded = True
                 yield pdf_path
                 for supplemental in download_supplements_for_doi(
@@ -926,26 +1092,17 @@ def batched_download(
                     raise DownloadError(f"No DOI for Crossref record: {record}")
                 fname = _safe_identifier(record.doi)
                 article_dir = output_root / fname
+                destination = _article_destination(article_dir, fname)
                 tried: list[Exception] = []
                 success = False
+                pdf_path: Optional[Path] = None
                 if openalex_client:
                     try:
-                        pdf_path = _article_destination(article_dir, fname)
                         pdf_path = openalex_client.download_pdf(
                             doi=record.doi,
-                            destination=pdf_path,
+                            destination=destination,
                             overwrite=overwrite,
                         )
-                        pdf_downloaded = True
-                        yield pdf_path
-                        for supplemental in download_supplements_for_doi(
-                            doi=record.doi,
-                            destination_dir=article_dir,
-                            session=supplement_session,
-                            overwrite=overwrite,
-                            publisher=record.publisher,
-                        ):
-                            yield supplemental
                         success = True
                     except Exception as exc:  # noqa: BLE001
                         LOGGER.debug(
@@ -956,22 +1113,11 @@ def batched_download(
                         tried.append(exc)
                 if not success and crossref_client:
                     try:
-                        pdf_path = _article_destination(article_dir, fname)
                         pdf_path = crossref_client.download_pdf(
                             doi=record.doi,
-                            destination=pdf_path,
+                            destination=destination,
                             overwrite=overwrite,
                         )
-                        pdf_downloaded = True
-                        yield pdf_path
-                        for supplemental in download_supplements_for_doi(
-                            doi=record.doi,
-                            destination_dir=article_dir,
-                            session=supplement_session,
-                            overwrite=overwrite,
-                            publisher=record.publisher,
-                        ):
-                            yield supplemental
                         success = True
                     except Exception as exc:  # noqa: BLE001
                         LOGGER.debug(
@@ -981,11 +1127,28 @@ def batched_download(
                         )
                         tried.append(exc)
                 if not success:
+                    fallback = _attempt_unpaywall_download(record.doi, destination)
+                    if fallback is not None:
+                        pdf_path = fallback
+                        success = True
+                if not success:
                     if tried:
                         raise tried[-1]
                     raise DownloadError(
                         "Neither OpenAlexClient nor CrossrefClient configured for Crossref record."
                     )
+                if not pdf_path:
+                    raise DownloadError(f"Unable to resolve PDF for Crossref DOI {record.doi}")
+                pdf_downloaded = True
+                yield pdf_path
+                for supplemental in download_supplements_for_doi(
+                    doi=record.doi,
+                    destination_dir=article_dir,
+                    session=supplement_session,
+                    overwrite=overwrite,
+                    publisher=record.publisher,
+                ):
+                    yield supplemental
             else:
                 raise DownloadError(
                     f"Unsupported publisher for record {record.publisher}: {record.title}"

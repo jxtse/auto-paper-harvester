@@ -27,21 +27,10 @@ Download throughput is automatically throttled to satisfy TDM rate limits.
    ```
 2. Copy `.env.example` to `.env` and fill in the credentials you have available.
 3. Export your Web of Science list as `savedrecs.xls` and place it next to this README.
-4. Run a configuration check before downloading:
+4. Run  the following command to download:
    ```bash
-   auto-paper-download --dry-run --verbose
+   python -m auto_paper_download --savedrecs savedrecs.xls (Optional: Specify xls files for targeted downloads.)
    ```
-   The dry run logs how many DOIs were detected, which publishers are enabled, and
-   sample identifiers without downloading anything.
-5. Drop the `--dry-run` flag once the summary looks right.
-
-## Installation
-
-```bash
-python -m venv .venv
-.venv\Scripts\activate
-pip install -e .
-```
 
 ## Configuration
 
@@ -54,12 +43,16 @@ pip install -e .
    SPRINGER_API_KEY=...        # optional, only used for open-access items
    CROSSREF_MAILTO=you@example.com
    OPENALEX_MAILTO=you@example.com
+   UNPAYWALL_EMAIL=you@example.com      # optional, enables Unpaywall OA fallback
+   CROSSREF_REQUEST_DELAY=4.0           # optional, seconds between Crossref requests
+   WILEY_REQUEST_DELAY=2.5              # optional, seconds between Wiley requests
    ```
    - Missing credentials simply exclude the corresponding publisher.
    - At least one `mailto` is required for Crossref/OpenAlex (polite requests policy).
+   - Set `UNPAYWALL_EMAIL` to enable an Unpaywall open-access fallback when publisher/OpenAlex sources cannot serve a PDF.
+   - Use `CROSSREF_REQUEST_DELAY` to throttle Crossref PDF fetches (default 4 s) and ease Cloudflare rate limits.
+   - Use `WILEY_REQUEST_DELAY` to pace Wiley API calls (default 2.5 s) and avoid rate-limit faults.
    - Springer returns open access records only; paywalled content still needs manual access.
-   - Credentials are optional—any publisher without configuration is skipped with an explanatory log message.
-
 The utility automatically reads the local `.env` file before resolving environment
 variables.
 
@@ -82,9 +75,8 @@ During a normal run the tool prints a download plan indicating how many DOIs wil
 fetched per publisher. Missing credentials or API keys are reported and the associated
 publishers are skipped instead of aborting the session.
 
-After the downloads finish, the CLI reports how many PDFs succeeded per publisher together
-with the corresponding success rate.
-
+After the downloads finish, the CLI reports how many PDFs succeeded per publisher together with the corresponding success rate.
+Whenever a publisher API or Crossref/OpenAlex cannot serve a PDF, the downloader attempts an Unpaywall open-access fallback when `UNPAYWALL_EMAIL` is configured.
 ## Supplementary materials
 
 After a PDF finishes downloading, the tool fetches the DOI landing page, looks for
@@ -111,4 +103,3 @@ collection. Warnings are logged when an SI download fails.
 ```bash
 pytest
 ```
-
