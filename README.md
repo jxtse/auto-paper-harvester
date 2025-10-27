@@ -98,6 +98,26 @@ collection. Warnings are logged when an SI download fails.
 - Examine the logs for the exact URL that failed when extending the downloader to new
   publishers.
 
+## MCP server
+
+This repository ships with a FastMCP server so MCP-compatible clients (including LLMs)
+can drive the downloader programmatically. After installing the project dependencies:
+
+```bash
+python auto_paper_download/mcp_server.py             # stdio transport (default)
+python auto_paper_download/mcp_server.py --transport http --port 8000
+```
+
+Key tools exposed by the server:
+- `configure_credentials` — register or clear TDM API keys and polite mailto addresses.
+- `parse_savedrecs` — extract DOIs from a `savedrecs` export (base64 payloads supported).
+- `download_papers` — download PDFs/SI for an explicit DOI list (with optional dry runs).
+- `get_job_summary` — retrieve the file list and metrics for a previous download job.
+
+`download_papers` accepts arbitrary DOI lists, so you can combine MCP prompts,
+`parse_savedrecs` output, or manually curated identifiers in a single call. Each job
+returns a `job_id`; use it with `get_job_summary` to re-fetch the results later.
+
 ## Testing
 
 ```bash

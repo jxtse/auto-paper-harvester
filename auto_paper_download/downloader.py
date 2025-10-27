@@ -66,6 +66,13 @@ def extract_dois(savedrecs_path: Path) -> list[str]:
     literals in its UTF-8/Latin-1 payload.
     """
     text = savedrecs_path.read_text(encoding="latin-1", errors="ignore")
+    return extract_dois_from_text(text)
+
+
+def extract_dois_from_text(text: str) -> list[str]:
+    """
+    Parse a string payload and return a de-duplicated DOI list using ``DOI_PATTERN``.
+    """
     seen: set[str] = set()
     dois: list[str] = []
     for match in DOI_PATTERN.finditer(text):
@@ -130,28 +137,85 @@ def download_from_savedrecs(
     max_per_publisher: int | None = None,
     overwrite: bool = False,
     dry_run: bool = False,
+  ) -> Iterator[Path]:
+      """
+      Download PDFs (and any discoverable SI files) referenced in ``savedrecs.xls`` while honoring publisher rate limits.
+
+      When ``dry_run`` is ``True``, the function only reports on the detected DOIs and
+      which publishers are configured, without attempting any downloads.
+      """
+      load_env_file()
+      dois = extract_dois(savedrecs)
+      LOGGER.info("Extracted %d DOIs from %s", len(dois), savedrecs)
+      return download_from_dois(
+          dois=dois,
+          output_dir=output_dir,
+          delay_seconds=delay_seconds,
+          max_per_publisher=max_per_publisher,
+          overwrite=overwrite,
+          dry_run=dry_run,
+          load_env=False,
+      )
+
+
+def download_from_dois(
+    *,
+    dois: Iterable[str],
+    output_dir: Path,
+    delay_seconds: float = DEFAULT_DELAY_SECONDS,
+    max_per_publisher: int | None = None,
+    overwrite: bool = False,
+    dry_run: bool = False,
+    load_env: bool = True,
 ) -> Iterator[Path]:
     """
-    Download PDFs (and any discoverable SI files) referenced in ``savedrecs.xls`` while honoring publisher rate limits.
+    Download PDFs for the provided DOI list using the configured publisher clients.
 
-    When ``dry_run`` is ``True``, the function only reports on the detected DOIs and
-    which publishers are configured, without attempting any downloads.
+    ``dois`` may be any iterable; it is consumed eagerly so the caller can supply generators.
+    Set ``load_env`` to ``False`` when credentials are injected programmatically.
     """
-    load_env_file()
-    dois = extract_dois(savedrecs)
-    LOGGER.info("Extracted %d DOIs from %s", len(dois), savedrecs)
-    records = records_from_dois(dois)
+    if load_env:
+        load_env_file()
 
-    if max_per_publisher is not None:
-        records = _limit_records_per_publisher(records, max_per_publisher)
-
-    if not records:
-        LOGGER.warning(
-            "No Wiley, Elsevier, Springer, or Crossref-eligible DOIs detected in %s",
-            savedrecs,
-        )
+    doi_list = list(dois)
+    if not doi_list:
+        LOGGER.warning("No DOIs supplied for download.")
         return iter(())
 
+    LOGGER.info("Preparing downloads for %d DOI(s).", len(doi_list))
+    records = _prepare_records(doi_list, max_per_publisher=max_per_publisher)
+
+    if not records:
+        LOGGER.warning("No Wiley, Elsevier, Springer, or Crossref-eligible DOIs detected.")
+        return iter(())
+
+    return _execute_download(
+        records=records,
+        output_dir=output_dir,
+        delay_seconds=delay_seconds,
+        overwrite=overwrite,
+        dry_run=dry_run,
+    )
+
+
+def _prepare_records(
+    dois: Iterable[str], *, max_per_publisher: int | None = None
+) -> list[ArticleRecord]:
+    records = records_from_dois(dois)
+    if max_per_publisher is not None:
+        records = _limit_records_per_publisher(records, max_per_publisher)
+    return records
+
+
+def _execute_download(
+    *,
+    records: list[ArticleRecord],
+    output_dir: Path,
+    delay_seconds: float,
+    overwrite: bool,
+    dry_run: bool,
+) -> Iterator[Path]:
+    records = list(records)
     disabled_publishers: list[str] = []
 
     def has_records(publisher_name: str) -> bool:
