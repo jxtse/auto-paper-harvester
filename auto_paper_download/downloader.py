@@ -64,7 +64,62 @@ def extract_dois(savedrecs_path: Path) -> list[str]:
 
     The file is a legacy XLS container. We avoid third-party readers by scanning for DOI
     literals in its UTF-8/Latin-1 payload.
+    
+    Also supports real Excel files (.xls/.xlsx) with a DOI column.
     """
+    # Try to detect if it's a real Excel file by attempting to read with pandas
+    try:
+        import pandas as pd  # type: ignore
+        df = pd.read_excel(savedrecs_path)
+        # Look for a column that contains DOIs
+        doi_column = None
+        for col in df.columns:
+            col_lower = str(col).lower().strip()
+            # Support various DOI column names
+            if col_lower in ('doi', 'dois', 'digital object identifier', 'digitalobjectidentifier', 'doi_url', 'doi url'):
+                doi_column = col
+                break
+            # Also check if column name contains 'doi'
+            if 'doi' in col_lower and doi_column is None:
+                doi_column = col
+        
+        if doi_column is not None:
+            LOGGER.info("Detected real Excel file with DOI column: %s", doi_column)
+            # Extract DOIs from the column
+            dois_from_excel = []
+            for value in df[doi_column].dropna():
+                value_str = str(value).strip()
+                # Remove common prefixes like "https://doi.org/" or "http://dx.doi.org/"
+                if value_str.startswith(('https://doi.org/', 'http://doi.org/', 'https://dx.doi.org/', 'http://dx.doi.org/')):
+                    value_str = value_str.split('doi.org/')[-1]
+                # Validate it's a proper DOI format
+                if value_str and DOI_PATTERN.match(value_str):
+                    dois_from_excel.append(value_str)
+                elif value_str:
+                    # Try to extract DOI from the string using regex
+                    match = DOI_PATTERN.search(value_str)
+                    if match:
+                        dois_from_excel.append(match.group(0))
+            
+            if dois_from_excel:
+                # Deduplicate while preserving order
+                seen: set[str] = set()
+                deduplicated = []
+                for doi in dois_from_excel:
+                    if doi not in seen:
+                        seen.add(doi)
+                        deduplicated.append(doi)
+                LOGGER.info("Extracted %d DOIs from Excel file", len(deduplicated))
+                return deduplicated
+        else:
+            LOGGER.debug("No DOI column found in Excel file. Columns: %s", df.columns.tolist())
+    except ImportError:
+        LOGGER.debug("pandas not available, falling back to text parsing")
+    except Exception as e:
+        # If pandas read fails, fall back to text parsing
+        LOGGER.debug("Excel read failed, falling back to text parsing: %s", e)
+    
+    # Fall back to original text-based parsing for Web of Science exports
     text = savedrecs_path.read_text(encoding="latin-1", errors="ignore")
     return extract_dois_from_text(text)
 

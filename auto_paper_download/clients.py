@@ -213,7 +213,16 @@ class WileyClient:
         LOGGER.debug("Wiley download: %s -> %s", url, destination)
         headers = {"Accept": "application/pdf"}
         self._throttle()
-        response = self._session.get(url, headers=headers, timeout=120, stream=True)
+        try:
+            response = self._session.get(url, headers=headers, timeout=120, stream=True)
+        except requests.exceptions.TooManyRedirects:
+            raise DownloadError(
+                f"Wiley download failed for DOI {doi}: URL redirected too many times"
+            )
+        except requests.exceptions.RequestException as exc:
+            raise DownloadError(
+                f"Wiley download failed for DOI {doi}: {exc}"
+            )
         if response.status_code != requests.codes.ok:
             raise DownloadError(
                 f"Wiley download failed ({response.status_code}): {_response_preview(response)}"
@@ -330,9 +339,18 @@ class SpringerClient:
 
         destination.parent.mkdir(parents=True, exist_ok=True)
         LOGGER.debug("Springer download: %s -> %s", pdf_url, destination)
-        response = self._session.get(
-            pdf_url, headers={"Accept": "application/pdf"}, timeout=120, stream=True
-        )
+        try:
+            response = self._session.get(
+                pdf_url, headers={"Accept": "application/pdf"}, timeout=120, stream=True
+            )
+        except requests.exceptions.TooManyRedirects:
+            raise DownloadError(
+                f"Springer download failed for DOI {doi}: URL redirected too many times"
+            )
+        except requests.exceptions.RequestException as exc:
+            raise DownloadError(
+                f"Springer download failed for DOI {doi}: {exc}"
+            )
         if response.status_code != requests.codes.ok:
             raise DownloadError(
                 f"Springer download failed ({response.status_code}): {_response_preview(response)}"
@@ -463,9 +481,18 @@ class CrossrefClient:
         destination.parent.mkdir(parents=True, exist_ok=True)
         LOGGER.debug("Crossref download: %s -> %s", pdf_url, destination)
         self._throttle()
-        response = self._session.get(
-            pdf_url, headers={"Accept": "application/pdf"}, timeout=120, stream=True
-        )
+        try:
+            response = self._session.get(
+                pdf_url, headers={"Accept": "application/pdf"}, timeout=120, stream=True
+            )
+        except requests.exceptions.TooManyRedirects:
+            raise DownloadError(
+                f"Crossref download failed for DOI {doi}: URL redirected too many times"
+            )
+        except requests.exceptions.RequestException as exc:
+            raise DownloadError(
+                f"Crossref download failed for DOI {doi}: {exc}"
+            )
         if response.status_code != requests.codes.ok:
             body_text = response.text or ""
             if response.status_code == 403 and "Just a moment" in body_text:
@@ -654,7 +681,16 @@ class UnpaywallClient:
 
         destination.parent.mkdir(parents=True, exist_ok=True)
         LOGGER.debug("Unpaywall download: %s -> %s", pdf_url, destination)
-        response = self._session.get(pdf_url, timeout=120, stream=True)
+        try:
+            response = self._session.get(pdf_url, timeout=120, stream=True)
+        except requests.exceptions.TooManyRedirects:
+            raise DownloadError(
+                f"Unpaywall download failed for DOI {doi}: URL redirected too many times (possibly broken link)"
+            )
+        except requests.exceptions.RequestException as exc:
+            raise DownloadError(
+                f"Unpaywall download failed for DOI {doi}: {exc}"
+            )
         if response.status_code != requests.codes.ok:
             raise DownloadError(
                 f"Unpaywall download failed ({response.status_code}) for DOI {doi}"
@@ -752,9 +788,18 @@ class OpenAlexClient:
 
         destination.parent.mkdir(parents=True, exist_ok=True)
         LOGGER.debug("OpenAlex download: %s -> %s", pdf_url, destination)
-        response = self._session.get(
-            pdf_url, headers={"Accept": "application/pdf"}, timeout=120, stream=True
-        )
+        try:
+            response = self._session.get(
+                pdf_url, headers={"Accept": "application/pdf"}, timeout=120, stream=True
+            )
+        except requests.exceptions.TooManyRedirects:
+            raise DownloadError(
+                f"OpenAlex download failed for DOI {doi}: URL redirected too many times"
+            )
+        except requests.exceptions.RequestException as exc:
+            raise DownloadError(
+                f"OpenAlex download failed for DOI {doi}: {exc}"
+            )
         if response.status_code != requests.codes.ok:
             raise DownloadError(
                 f"OpenAlex download failed ({response.status_code}): {_response_preview(response)}"
@@ -929,7 +974,16 @@ class ElsevierClient:
         )
         params = {"httpAccept": "application/pdf"}
         LOGGER.debug("Elsevier download: %s params=%s -> %s", url, params, destination)
-        response = self._session.get(url, params=params, timeout=120, stream=True)
+        try:
+            response = self._session.get(url, params=params, timeout=120, stream=True)
+        except requests.exceptions.TooManyRedirects:
+            raise DownloadError(
+                f"Elsevier download failed for {identifier_type} {identifier}: URL redirected too many times"
+            )
+        except requests.exceptions.RequestException as exc:
+            raise DownloadError(
+                f"Elsevier download failed for {identifier_type} {identifier}: {exc}"
+            )
         if response.status_code != requests.codes.ok:
             raise DownloadError(
                 f"Elsevier download failed ({response.status_code}): {_response_preview(response)}"
@@ -989,6 +1043,25 @@ def batched_download(
             metrics_entry["attempted"] += 1
         article_dir: Optional[Path] = None
         pdf_downloaded = False
+        
+        # Early check: if PDF already exists and overwrite is False, skip everything
+        identifier = None
+        if "elsevier" in publisher:
+            identifier = record.doi or record.pii
+        elif "wiley" in publisher or "springer" in publisher or "crossref" in publisher:
+            identifier = record.doi
+        
+        if identifier and not overwrite:
+            fname = _safe_identifier(identifier)
+            article_dir_check = output_root / fname
+            pdf_path_check = _article_destination(article_dir_check, fname)
+            if pdf_path_check.exists():
+                LOGGER.info("跳过已存在的文章（PDF和SI均跳过）: %s", identifier)
+                yield pdf_path_check
+                if metrics_entry:
+                    metrics_entry["succeeded"] += 1
+                continue
+        
         try:
             if "elsevier" in publisher:
                 if not elsevier_client:
