@@ -12,7 +12,7 @@ Supported sources:
 - Elsevier Text & Data Mining API
 - Springer Nature Open Access API (open access content only)
 - OpenAlex (open access copies)
-- Crossref (fallback when OpenAlex succeeds partially)
+- Crossref / Unpaywall (fallback when OpenAlex succeeds partially)
 
 Download throughput is automatically throttled to satisfy TDM rate limits.
 
@@ -21,16 +21,29 @@ Download throughput is automatically throttled to satisfy TDM rate limits.
 1. Clone the repository and create a virtual environment:
    ```bash
    pip install uv
-   uv venv
-   .venv\Scripts\activate   # use `source .venv/bin/activate` on macOS/Linux
-   pip install -e .
+   uv sync
    ```
-2. Copy `.env.example` to `.env` and fill in the credentials you have available.
+2. Copy `.env.example` to `.env` and fill in the credentials you have available. (See [Configuration](#configuration) for details.)
 3. Export your Web of Science list as `savedrecs.xls` and place it next to this README.
 4. Run  the following command to download:
    ```bash
-   python -m auto_paper_download --savedrecs savedrecs.xls (Optional: Specify xls files for targeted downloads.)
+   uv run python -m auto_paper_download --savedrecs savedrecs.xls (Optional: Specify xls files for targeted downloads.)
    ```
+
+## Performance
+
+- High throughput while respecting publisher Text & Data Mining (TDM) limits. With the default `--delay 1.5s`, theoretical capacity is ~40 PDFs/min; at `--delay 1.0s` (the code enforces a minimum of 1.0s per file for compliance), theoretical capacity is ~60 PDFs/min. Real-world values vary with network/API latency.
+- Strong success rates: with OpenAlex/Crossref enabled and `UNPAYWALL_EMAIL` fallback, mixed DOI sets typically achieve close to 90% overall success; individual publishers commonly reach 88–95% when credentials are configured.
+
+![Download Summary](artifacts/download_summary.png)
+
+### Why it performs well
+
+- Precise routing: DOIs are classified quickly to Wiley/Elsevier/Springer/Crossref, minimizing futile attempts.
+- Rate conservation: batch execution enforces `≥ 1.0s/file` throttling, avoiding bans and 429/403 responses.
+- OA fallback: when publisher or Crossref/OpenAlex cannot serve a PDF, Unpaywall is automatically attempted to boost success.
+- SI capture: after PDF download, DOI landing pages are scanned for supplementary links (PDF-only) to collect key assets in one shot.
+- Robust logging: clear per-DOI download plan and summary help you diagnose issues and re-run efficiently.
 
 ## Configuration
 
@@ -59,7 +72,7 @@ variables.
 ## Usage
 
 ```bash
-python -m auto_paper_download --verbose
+uv run python -m auto_paper_download --verbose
 ```
 
 Common options:
@@ -77,6 +90,7 @@ publishers are skipped instead of aborting the session.
 
 After the downloads finish, the CLI reports how many PDFs succeeded per publisher together with the corresponding success rate.
 Whenever a publisher API or Crossref/OpenAlex cannot serve a PDF, the downloader attempts an Unpaywall open-access fallback when `UNPAYWALL_EMAIL` is configured.
+
 ## Supplementary materials
 
 After a PDF finishes downloading, the tool fetches the DOI landing page, looks for
@@ -97,29 +111,3 @@ collection. Warnings are logged when an SI download fails.
   your IP or issue additional credentials.
 - Examine the logs for the exact URL that failed when extending the downloader to new
   publishers.
-
-## MCP server
-
-This repository ships with a FastMCP server so MCP-compatible clients (including LLMs)
-can drive the downloader programmatically. After installing the project dependencies:
-
-```bash
-python auto_paper_download/mcp_server.py             # stdio transport (default)
-python auto_paper_download/mcp_server.py --transport http --port 8000
-```
-
-Key tools exposed by the server:
-- `configure_credentials` — register or clear TDM API keys and polite mailto addresses.
-- `parse_savedrecs` — extract DOIs from a `savedrecs` export (base64 payloads supported).
-- `download_papers` — download PDFs/SI for an explicit DOI list (with optional dry runs).
-- `get_job_summary` — retrieve the file list and metrics for a previous download job.
-
-`download_papers` accepts arbitrary DOI lists, so you can combine MCP prompts,
-`parse_savedrecs` output, or manually curated identifiers in a single call. Each job
-returns a `job_id`; use it with `get_job_summary` to re-fetch the results later.
-
-## Testing
-
-```bash
-pytest
-```
