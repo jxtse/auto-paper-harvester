@@ -1,4 +1,4 @@
-﻿# Auto Paper Harvester
+# Auto Paper Harvester
 
 This is a command line helper that parses Web of Science `savedrecs.xls`
 exports, identifies DOIs, selects the appropriate publisher interface, and downloads the
@@ -29,6 +29,39 @@ Download throughput is automatically throttled to satisfy TDM rate limits.
    ```bash
    uv run python -m auto_paper_download --savedrecs savedrecs.xls (Optional: Specify xls files for targeted downloads.)
    ```
+
+## Automated Workflow with Claude Code
+
+Use Claude Code to streamline end-to-end literature tasks: search papers first, then download PDFs automatically.
+
+1) Research and discovery
+- Open Claude Code’s AI Research Assistant to refine topics, generate queries, and plan search strategies.
+- Use the Semantic Scholar MCP tool to search, filter, and collect candidate papers.
+- Extract DOIs from results and save them to a text file (one DOI per line), for example `dois.txt`:
+  ```text
+  10.1038/s41586-020-2649-2
+  10.1039/d2nr01648f
+  10.1021/acsabm.2c01041
+  ```
+
+2) Automated PDF download via Project Skills
+- This repository includes a Project Skill under `.claude/skills/paper-download` with two helper scripts that invoke `auto_paper_download`:
+  - Single DOI:
+    ```bash
+    python .claude/skills/paper-download/scripts/download_by_doi.py --doi 10.1038/s41586-020-2649-2 --verbose
+    ```
+  - Multiple DOIs (repeatable flags or a file):
+    ```bash
+    # Repeatable flags
+    python .claude/skills/paper-download/scripts/download_multiple_dois.py \
+      --doi 10.1038/s41586-020-2649-2 \
+      --doi 10.1039/d2nr01648f \
+      --verbose
+
+    # From a file
+    python .claude/skills/paper-download/scripts/download_multiple_dois.py --doi-file ./dois.txt --delay 1.5 --verbose
+    ```
+- Outputs are saved under `downloads/pdfs/<doi-slug>/`; supplementary PDFs (if detected) are stored alongside the main PDF.
 
 ## Performance
 

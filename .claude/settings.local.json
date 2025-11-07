@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__adamamer-20-paper-search-mcp-openai__search_arxiv",
+      "mcp__adamamer-20-paper-search-mcp-openai__search_semantic",
+      "mcp__adamamer-20-paper-search-mcp-openai__search_pubmed",
+      "mcp__adamamer-20-paper-search-mcp-openai__download_arxiv",
+      "mcp__adamamer-20-paper-search-mcp-openai__download_semantic",
+      "Skill(paper-download)",
+      "mcp__hamid-vakilzadeh-mcpsemanticscholar__paper-search-advanced",
+      "Bash(python .claude/skills/paper-download/scripts/download_multiple_dois.py --doi-file ./dois.txt --verbose)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

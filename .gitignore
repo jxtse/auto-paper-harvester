@@ -11,6 +11,7 @@ __pycache__
 *.xls
 !README.md
 !docs/**/*
+CLAUDE.md
 *.fasta
 
 *.env
