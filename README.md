@@ -35,8 +35,6 @@ Download throughput is automatically throttled to satisfy TDM rate limits.
 - High throughput while respecting publisher Text & Data Mining (TDM) limits. With the default `--delay 1.5s`, theoretical capacity is ~40 PDFs/min; at `--delay 1.0s` (the code enforces a minimum of 1.0s per file for compliance), theoretical capacity is ~60 PDFs/min. Real-world values vary with network/API latency.
 - Strong success rates: with OpenAlex/Crossref enabled and `UNPAYWALL_EMAIL` fallback, mixed DOI sets typically achieve close to 90% overall success; individual publishers commonly reach 88–95% when credentials are configured.
 
-![Download Summary](artifacts/download_summary.png)
-
 ### Why it performs well
 
 - Precise routing: DOIs are classified quickly to Wiley/Elsevier/Springer/Crossref, minimizing futile attempts.
