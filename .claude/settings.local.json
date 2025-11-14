@@ -8,7 +8,14 @@
       "mcp__adamamer-20-paper-search-mcp-openai__download_semantic",
       "Skill(paper-download)",
       "mcp__hamid-vakilzadeh-mcpsemanticscholar__paper-search-advanced",
-      "Bash(python .claude/skills/paper-download/scripts/download_multiple_dois.py --doi-file ./dois.txt --verbose)"
+      "Bash(python .claude/skills/paper-download/scripts/download_multiple_dois.py --doi-file ./dois.txt --verbose)",
+      "mcp__adamamer-20-paper-search-mcp-openai__search_biorxiv",
+      "mcp__adamamer-20-paper-search-mcp-openai__search_medrxiv",
+      "Bash(python .claude/skills/paper-download/scripts/download_multiple_dois.py --doi-file ./peptide_catalysis_doi_batch_1.txt --delay 2.0 --verbose)",
+      "Bash(python .claude/skills/paper-download/scripts/download_multiple_dois.py --doi-file ./peptide_catalysis_batch_3_dois.txt --delay 2.5 --verbose)",
+      "Bash(python .claude/skills/paper-download/scripts/download_multiple_dois.py --doi-file ./peptide_catalysis_batch_5_dois.txt --delay 2.5 --verbose)",
+      "Bash(python .claude/skills/paper-download/scripts/download_multiple_dois.py --doi-file ./peptide_catalysis_batch_7_dois.txt --delay 2.5 --verbose)",
+      "mcp__adamamer-20-paper-search-mcp-openai__search"
     ],
     "deny": [],
     "ask": []
