@@ -25,6 +25,16 @@ description: Download paper PDFs by single or multiple DOIs using auto_paper_dow
 - `scripts/download_by_doi.py`: download a single DOI.
 - `scripts/download_multiple_dois.py`: download multiple DOIs (via repeated flags or a file).
 
+## DOI Examples and Templates
+- **`DOI_EXAMPLES.md`**: Complete reference guide with valid DOI formats, publisher-specific examples, file naming conventions, and best practices.
+- **`example_dois.txt`**: Ready-to-use example DOI file for testing (remove header comments before use).
+
+See `DOI_EXAMPLES.md` for:
+- Valid DOI formats (standard and URL forms)
+- Publisher-specific DOI examples
+- File naming conventions for batch downloads
+- Complete usage examples and best practices
+
 ## Single DOI Usage
 Run from the project root:
 
