@@ -29,7 +29,7 @@ DOI_PATTERN = re.compile(r"10\.\d{4,9}/[\x21-\x7E]+")
 WILEY_PREFIXES = ("10.1002", "10.1111")
 ELSEVIER_PREFIXES = ("10.1016", "10.1011")  # 10.1011 is rare but reserved by Elsevier
 SPRINGER_PREFIXES = ("10.1007", "10.1038", "10.1186")
-DEFAULT_DELAY_SECONDS = 1.5  # respect the 1 PDF/sec cap with a small safety margin
+DEFAULT_DELAY_SECONDS = 5  # respect the 1 PDF/sec cap with a small safety margin
 
 
 def load_env_file(path: Path | str = ".env") -> bool:
