@@ -958,6 +958,9 @@ class ElsevierClient:
 
         Elsevier sometimes rejects DOI downloads for certain content types; in that case
         retry with the PII supplied by the search endpoint.
+
+        We explicitly request ``view=FULL`` for PDF retrieval because the Article Retrieval
+        API defaults to metadata-oriented views unless a fuller view is requested.
         """
         if not doi and not pii:
             raise ValueError("download_pdf requires a DOI or PII.")
@@ -972,8 +975,16 @@ class ElsevierClient:
         url = self.ARTICLE_URL_TEMPLATE.format(
             identifier_type=identifier_type, identifier=identifier
         )
-        params = {"httpAccept": "application/pdf"}
-        LOGGER.debug("Elsevier download: %s params=%s -> %s", url, params, destination)
+        params = {
+            "httpAccept": "application/pdf",
+            "view": "FULL",
+        }
+        LOGGER.debug(
+            "Elsevier download: %s params=%s -> %s (FULL view requested)",
+            url,
+            params,
+            destination,
+        )
         try:
             response = self._session.get(url, params=params, timeout=120, stream=True)
         except requests.exceptions.TooManyRedirects:
