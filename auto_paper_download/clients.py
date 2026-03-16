@@ -38,6 +38,46 @@ def _response_preview(response: requests.Response, *, limit: int = 160) -> str:
     return text
 
 
+def _response_header_snapshot(
+    response: requests.Response,
+    *,
+    include: Optional[Sequence[str]] = None,
+) -> dict[str, str]:
+    """
+    Capture a compact subset of response headers for diagnostics.
+    """
+    if response is None:
+        return {}
+
+    include_lower = {
+        header.lower()
+        for header in (
+            include
+            or (
+                "content-type",
+                "content-length",
+                "content-disposition",
+                "location",
+                "x-els-status",
+                "x-els-trace-id",
+                "x-ratelimit-limit",
+                "x-ratelimit-remaining",
+                "retry-after",
+            )
+        )
+    }
+
+    headers: dict[str, str] = {}
+    for key, value in response.headers.items():
+        key_lower = key.lower()
+        if key_lower in include_lower or key_lower.startswith("x-els-"):
+            if key_lower in {"authorization", "x-els-apikey", "x-els-insttoken"}:
+                headers[key] = "[redacted]"
+            else:
+                headers[key] = value
+    return headers
+
+
 def _safe_identifier(identifier: str) -> str:
     """
     Collapse characters that Windows filesystems reject into underscores, while preserving dots.
@@ -866,6 +906,8 @@ class ElsevierClient:
         self,
         *,
         api_key: Optional[str] = None,
+        insttoken: Optional[str] = None,
+        authtoken: Optional[str] = None,
         session: Optional[requests.Session] = None,
         user_agent: str = DEFAULT_USER_AGENT,
     ) -> None:
@@ -875,15 +917,29 @@ class ElsevierClient:
                 "ElsevierClient requires an API key. "
                 "Set ELSEVIER_API_KEY or pass api_key= explicitly."
             )
+        insttoken = insttoken or os.getenv("ELSEVIER_INSTTOKEN")
+        authtoken = authtoken or os.getenv("ELSEVIER_AUTHTOKEN")
 
         self._api_key = api_key
+        self._insttoken = insttoken
+        self._authtoken = authtoken
         self._session = session or requests.Session()
-        self._session.headers.update(
-            {
-                "X-ELS-APIKey": api_key,
-                "Accept": "application/json",
-                "User-Agent": user_agent,
-            }
+        headers = {
+            "X-ELS-APIKey": api_key,
+            "Accept": "application/json",
+            "User-Agent": user_agent,
+        }
+        if insttoken:
+            headers["X-ELS-Insttoken"] = insttoken
+        if authtoken:
+            headers["Authorization"] = f"Bearer {authtoken}"
+        self._session.headers.update(headers)
+
+        LOGGER.info(
+            "Elsevier auth context: api_key=yes insttoken=%s authtoken=%s user_agent=%s",
+            "yes" if insttoken else "no",
+            "yes" if authtoken else "no",
+            user_agent,
         )
 
     def search(
@@ -959,8 +1015,9 @@ class ElsevierClient:
         Elsevier sometimes rejects DOI downloads for certain content types; in that case
         retry with the PII supplied by the search endpoint.
 
-        We explicitly request ``view=FULL`` for PDF retrieval because the Article Retrieval
-        API defaults to metadata-oriented views unless a fuller view is requested.
+        For the article retrieval endpoint, ``httpAccept=application/pdf`` is sufficient
+        for PDF delivery. Some ``view`` values that work for metadata retrieval return
+        ``INVALID_INPUT`` when combined with PDF retrieval, so we intentionally omit them.
         """
         if not doi and not pii:
             raise ValueError("download_pdf requires a DOI or PII.")
@@ -975,15 +1032,20 @@ class ElsevierClient:
         url = self.ARTICLE_URL_TEMPLATE.format(
             identifier_type=identifier_type, identifier=identifier
         )
-        params = {
-            "httpAccept": "application/pdf",
-            "view": "FULL",
-        }
+        params = {"httpAccept": "application/pdf"}
+        LOGGER.info(
+            "Elsevier PDF request: %s=%s destination=%s overwrite=%s auth[insttoken=%s authtoken=%s]",
+            identifier_type,
+            identifier,
+            destination,
+            overwrite,
+            "yes" if self._insttoken else "no",
+            "yes" if self._authtoken else "no",
+        )
         LOGGER.debug(
-            "Elsevier download: %s params=%s -> %s (FULL view requested)",
+            "Elsevier download request: url=%s params=%s",
             url,
             params,
-            destination,
         )
         try:
             response = self._session.get(url, params=params, timeout=120, stream=True)
@@ -995,15 +1057,34 @@ class ElsevierClient:
             raise DownloadError(
                 f"Elsevier download failed for {identifier_type} {identifier}: {exc}"
             )
+        response_headers = _response_header_snapshot(response)
+        LOGGER.info(
+            "Elsevier response: status=%s final_url=%s headers=%s",
+            response.status_code,
+            response.url,
+            response_headers,
+        )
         if response.status_code != requests.codes.ok:
             raise DownloadError(
-                f"Elsevier download failed ({response.status_code}): {_response_preview(response)}"
+                "Elsevier download failed "
+                f"({response.status_code}) headers={response_headers}: {_response_preview(response)}"
             )
 
+        total_bytes = 0
+        signature = b""
         with destination.open("wb") as fout:
             for chunk in response.iter_content(chunk_size=65536):
                 if chunk:
+                    if not signature:
+                        signature = chunk[:8]
+                    total_bytes += len(chunk)
                     fout.write(chunk)
+        LOGGER.info(
+            "Elsevier PDF saved: path=%s bytes=%d pdf_signature=%s",
+            destination,
+            total_bytes,
+            signature.decode("latin-1", errors="replace"),
+        )
         return destination
 
 
