@@ -1,32 +1,24 @@
 ---
 name: paper-download
 description: >
-  Use when the user asks to download paper PDFs by one or more DOIs.
-  Routes each DOI through publisher TDM APIs (Wiley/Elsevier/Springer),
-  then OA fallbacks (OpenAlex/Crossref/Unpaywall), and — when --use-browser-fallback
-  is set — a final Playwright pass that reuses institutional cookies for
-  ACS/RSC/IEEE/AIP/IOP/APS. Not for paper search, Zotero import, or downloading
-  the *references of* a paper (use ref-downloader for that).
+  Use this skill when the user wants to download paper PDFs by DOI(s). Triggers:
+  "下载这个/这几个 DOI的 PDF/全文", "把这个 DOI 列表全部下下来", "批量下 dois.txt", "download
+  paper(s) for DOI(s) …", "bulk-download from this Web of Science / WoS savedrecs
+  export". Routes each DOI through publisher TDM APIs (Wiley/Elsevier/Springer)
+  then OA fallbacks (OpenAlex/Crossref/Unpaywall), and — when
+  --use-browser-fallback is set — a final Playwright pass that reuses
+  institutional cookies for ACS/RSC/IEEE/AIP/IOP/APS/Science. DO NOT use for paper
+  *search* (use Semantic Scholar / arXiv instead), Zotero import / metadata sync,
+  or downloading *all references of* a single paper (use the ref-downloader skill).
 ---
 
 # Paper Download — Agent Runbook
 
-> Slim runbook for agent use. Configuration depth and human-facing reference
-> material live in the project docs:
+> Slim runbook loaded when the skill is invoked. Configuration depth and
+> human-facing reference live in the project docs:
 > - **[../../../README.md](../../../README.md)** — install + invoke (humans and agents)
 > - **[../../../docs/BROWSER_FALLBACK.md](../../../docs/BROWSER_FALLBACK.md)** — every browser-fallback knob
 > - **[../../../docs/SUPPORTED_PUBLISHERS.md](../../../docs/SUPPORTED_PUBLISHERS.md)** — per-publisher routing + tier table
-
-## When to invoke
-
-**Invoke for:**
-- "下载 DOI 10.x/y 的 PDF" / "把这几个 DOI 的全文下下来" / "批量下这个 DOI 列表"
-- "Download paper(s) for DOI(s) ..." / "Bulk-download from this WoS export"
-
-**Don't invoke for:**
-- Paper *search* (use Semantic Scholar / arXiv / web search)
-- Downloading *all references* of one paper (use `ref-downloader` skill — different scope)
-- Zotero import / metadata sync
 
 ## Prerequisites (verify once per workspace)
 
