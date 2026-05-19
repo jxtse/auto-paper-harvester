@@ -7,12 +7,24 @@ on the landing page. Each article ends up in
 `downloads/pdfs/<doi-slug>/` with the main PDF named after the DOI slug,
 plus any SI files located during scraping.
 
-Supported sources:
-- Wiley Text & Data Mining API
-- Elsevier Text & Data Mining API
-- Springer Nature Open Access API (open access content only)
-- OpenAlex (open access copies)
-- Crossref / Unpaywall (fallback when OpenAlex succeeds partially)
+**v0.2.0 highlights**
+- Publisher router rewritten — now recognises **24 DOI prefixes** across 19 publisher
+  families (was 4). See [docs/SUPPORTED_PUBLISHERS.md](docs/SUPPORTED_PUBLISHERS.md).
+- New **`--use-browser-fallback`** flag: after the HTTP/OA pipeline finishes, retry
+  every failed DOI through a Playwright-driven Chromium session that reuses the user's
+  institutional cookies. Lifts ACS / RSC / IEEE / AIP / IOP / APS from "always-fails"
+  to "usually-works" for institutional users.
+- Failed-DOI tracking + per-publisher residual-failure summary in the CLI output.
+- Skill (`.claude/skills/paper-download/SKILL.md`) rewritten in agent-runbook style with
+  trigger phrases, pre-flight checklist, output layout, and per-publisher tier table.
+
+## Supported sources
+
+| Layer | Sources |
+|---|---|
+| Publisher TDM APIs | Wiley, Elsevier |
+| OA APIs | Springer Nature OA, OpenAlex, Crossref, Unpaywall |
+| Browser fallback (opt-in) | ACS, RSC, IEEE, AIP, IOP, APS, AAAS/Science, Nature, Annual Reviews, Taylor & Francis, ECS, AVS, OSA, KPS, PNAS, ... |
 
 Download throughput is automatically throttled to satisfy TDM rate limits.
 
@@ -29,6 +41,29 @@ Download throughput is automatically throttled to satisfy TDM rate limits.
    ```bash
    uv run python -m auto_paper_download --savedrecs savedrecs.xls (Optional: Specify xls files for targeted downloads.)
    ```
+
+### (Optional) Enable browser fallback for paywalled publishers
+
+For publishers without a public TDM API (ACS, RSC, IEEE, AIP, IOP, APS, ...), enable
+the Playwright-driven fallback. It reuses your existing institutional SSO session, so
+paywalled DOIs your university subscribes to become downloadable.
+
+```bash
+pip install 'auto-paper-download[browser]'   # or: pip install playwright
+playwright install chromium                   # ~150 MB, one-time
+
+uv run python -m auto_paper_download \
+  --savedrecs savedrecs.xls \
+  --use-browser-fallback
+```
+
+First run opens a real Chromium window — log into your institution's SSO once,
+and the cookies persist under `~/.cache/auto_paper_download/browser_profile/` for
+all subsequent runs.
+
+See [docs/SUPPORTED_PUBLISHERS.md](docs/SUPPORTED_PUBLISHERS.md) for the per-publisher
+tier table, and the [paper-download SKILL.md](.claude/skills/paper-download/SKILL.md)
+for full configuration of the browser fallback.
 
 ## Automated Workflow with Claude Code
 
@@ -113,6 +148,7 @@ Common options:
 - `--delay`: seconds between requests (defaults to 1.5, enforced minimum 1.0)
 - `--overwrite`: re-download files even if they already exist
 - `--dry-run`: inspect the detected DOIs and publisher configuration without downloading
+- `--use-browser-fallback`: after HTTP/OA paths fail, retry via Playwright + Chromium using your institutional SSO cookies (one-time `pip install 'auto-paper-download[browser]' && playwright install chromium`)
 - `--verbose`: emit debug logs for troubleshooting
 
 During a normal run the tool prints a download plan indicating how many DOIs will be

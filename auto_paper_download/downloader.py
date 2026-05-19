@@ -22,13 +22,20 @@ from .clients import (
     WileyClient,
     batched_download,
 )
+from .publishers import (
+    classify_publisher as _classify_publisher_info,
+    family_to_legacy_publisher,
+    needs_browser_fallback,
+)
 
 LOGGER = logging.getLogger(__name__)
 
 DOI_PATTERN = re.compile(r"10\.\d{4,9}/[\x21-\x7E]+")
+# Legacy prefix tuples kept for backwards-compat with any external imports.
+# The authoritative routing now lives in ``auto_paper_download.publishers``.
 WILEY_PREFIXES = ("10.1002", "10.1111")
-ELSEVIER_PREFIXES = ("10.1016", "10.1011")  # 10.1011 is rare but reserved by Elsevier
-SPRINGER_PREFIXES = ("10.1007", "10.1038", "10.1186")
+ELSEVIER_PREFIXES = ("10.1016", "10.1011")
+SPRINGER_PREFIXES = ("10.1007", "10.1038", "10.1186", "10.1147")
 DEFAULT_DELAY_SECONDS = 1.5  # respect the 1 PDF/sec cap with a small safety margin
 
 
@@ -141,15 +148,23 @@ def extract_dois_from_text(text: str) -> list[str]:
     return dois
 
 
-def classify_publisher(doi: str) -> str | None:
-    lowered = doi.lower()
-    if any(lowered.startswith(prefix) for prefix in WILEY_PREFIXES):
-        return "Wiley"
-    if any(lowered.startswith(prefix) for prefix in ELSEVIER_PREFIXES):
-        return "Elsevier"
-    if any(lowered.startswith(prefix) for prefix in SPRINGER_PREFIXES):
-        return "Springer"
-    return "Crossref"
+def classify_publisher(doi: str, journal: str = "") -> str | None:
+    """
+    Backwards-compatible publisher label resolver used by the existing dispatcher.
+
+    Wraps :func:`auto_paper_download.publishers.classify_publisher` and maps the new,
+    expanded publisher families back to the four legacy labels the rest of the pipeline
+    still keys on (``Wiley`` / ``Elsevier`` / ``Springer`` / ``Crossref``).
+
+    For publishers that *can* only be downloaded via institutional browser session
+    (ACS / RSC / AIP / IEEE / etc.) this returns ``"Crossref"`` so the OA fallback
+    chain (Crossref → OpenAlex → Unpaywall) still has a chance. Browser fallback,
+    when enabled, takes a second pass on whatever Crossref leaves un-downloaded.
+    """
+    info = _classify_publisher_info(doi, journal=journal)
+    if info is None:
+        return None
+    return family_to_legacy_publisher(info.family)
 
 
 def records_from_dois(dois: Iterable[str]) -> list[ArticleRecord]:
@@ -192,12 +207,17 @@ def download_from_savedrecs(
     max_per_publisher: int | None = None,
     overwrite: bool = False,
     dry_run: bool = False,
+    use_browser_fallback: bool = False,
   ) -> Iterator[Path]:
       """
       Download PDFs (and any discoverable SI files) referenced in ``savedrecs.xls`` while honoring publisher rate limits.
 
       When ``dry_run`` is ``True``, the function only reports on the detected DOIs and
       which publishers are configured, without attempting any downloads.
+
+      When ``use_browser_fallback`` is ``True``, DOIs that fail every HTTP/OA route are
+      retried in a second pass using a Playwright-driven Chromium session that reuses
+      the user's institutional cookies. Requires ``playwright`` to be installed.
       """
       load_env_file()
       dois = extract_dois(savedrecs)
@@ -210,6 +230,7 @@ def download_from_savedrecs(
           overwrite=overwrite,
           dry_run=dry_run,
           load_env=False,
+          use_browser_fallback=use_browser_fallback,
       )
 
 
@@ -222,6 +243,7 @@ def download_from_dois(
     overwrite: bool = False,
     dry_run: bool = False,
     load_env: bool = True,
+    use_browser_fallback: bool = False,
 ) -> Iterator[Path]:
     """
     Download PDFs for the provided DOI list using the configured publisher clients.
@@ -250,6 +272,7 @@ def download_from_dois(
         delay_seconds=delay_seconds,
         overwrite=overwrite,
         dry_run=dry_run,
+        use_browser_fallback=use_browser_fallback,
     )
 
 
@@ -269,6 +292,7 @@ def _execute_download(
     delay_seconds: float,
     overwrite: bool,
     dry_run: bool,
+    use_browser_fallback: bool = False,
 ) -> Iterator[Path]:
     records = list(records)
     disabled_publishers: list[str] = []
@@ -388,14 +412,121 @@ def _execute_download(
         raise
 
     class DownloadStream(Iterator[Path]):
-        def __init__(self, iterator: Iterator[Path], stats: dict[str, dict[str, int]]):
+        def __init__(
+            self,
+            iterator: Iterator[Path],
+            stats: dict[str, dict[str, int]],
+            *,
+            output_dir: Path,
+            overwrite: bool,
+            records: list[ArticleRecord],
+            run_browser_fallback: bool,
+        ):
             self._iterator = iterator
             self.metrics = stats
+            self._output_dir = output_dir
+            self._overwrite = overwrite
+            self._records = records
+            self._run_browser_fallback = run_browser_fallback
+            self._fallback_done = False
 
         def __iter__(self) -> "DownloadStream":
             return self
 
         def __next__(self) -> Path:
-            return next(self._iterator)
+            try:
+                return next(self._iterator)
+            except StopIteration:
+                # Primary pipeline exhausted; run browser fallback once if requested.
+                if self._run_browser_fallback and not self._fallback_done:
+                    self._fallback_done = True
+                    self._iterator = _iter_browser_fallback(
+                        metrics=self.metrics,
+                        records=self._records,
+                        output_dir=self._output_dir,
+                        overwrite=self._overwrite,
+                    )
+                    return next(self._iterator)
+                raise
 
-    return DownloadStream(generator, metrics)
+    return DownloadStream(
+        generator,
+        metrics,
+        output_dir=output_dir,
+        overwrite=overwrite,
+        records=records,
+        run_browser_fallback=use_browser_fallback,
+    )
+
+
+def _iter_browser_fallback(
+    *,
+    metrics: dict[str, dict[str, int]],
+    records: list[ArticleRecord],
+    output_dir: Path,
+    overwrite: bool,
+) -> Iterator[Path]:
+    """
+    Second-pass downloader: walks every DOI that failed the API/OA pipeline and tries
+    to fetch it via :func:`auto_paper_download.browser_fallback.browser_fallback_download`.
+
+    Updates ``metrics`` in-place under a synthetic ``"BrowserFallback"`` bucket so the
+    final report still reflects what the fallback recovered.
+    """
+    # Collect every failed DOI from any publisher bucket
+    failed: list[dict[str, str]] = []
+    for bucket in metrics.values():
+        for entry in bucket.get("failed_dois", []) or []:
+            failed.append(entry)
+
+    if not failed:
+        LOGGER.info("Browser fallback: nothing to retry (no failed DOIs).")
+        return
+
+    # Lazy import so the package still works without playwright installed
+    try:
+        from .browser_fallback import browser_fallback_download
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.warning("Browser fallback module unavailable: %s", exc)
+        return
+
+    from .publishers import classify_publisher as _classify_info
+
+    # Build a DOI → publisher_family map from the original records for selector hints
+    doi_to_family: dict[str, str] = {}
+    for rec in records:
+        if rec.doi:
+            info = _classify_info(rec.doi)
+            doi_to_family[rec.doi] = info.family if info else "unknown"
+
+    fallback_bucket = metrics.setdefault(
+        "BrowserFallback", {"attempted": 0, "succeeded": 0, "failed_dois": []}
+    )
+    LOGGER.info("Browser fallback: retrying %d failed DOIs", len(failed))
+
+    for entry in failed:
+        doi = entry.get("doi")
+        if not doi:
+            continue
+        fallback_bucket["attempted"] += 1
+        family = doi_to_family.get(doi, "unknown")
+        # Store each browser-fallback PDF in a dedicated subdir to avoid colliding
+        # with the API pipeline's per-DOI directory layout.
+        slug_dir = output_dir / "_browser_fallback"
+        result = browser_fallback_download(
+            doi=doi,
+            output_dir=slug_dir,
+            publisher_family=family,
+            overwrite=overwrite,
+        )
+        if result.success and result.saved_path is not None:
+            fallback_bucket["succeeded"] += 1
+            LOGGER.info("Browser fallback recovered %s -> %s", doi, result.saved_path)
+            yield result.saved_path
+        else:
+            fallback_bucket["failed_dois"].append({
+                "doi": doi,
+                "reason": f"{result.status}: {result.reason}",
+            })
+            LOGGER.info("Browser fallback could not recover %s (%s: %s)",
+                        doi, result.status, result.reason)

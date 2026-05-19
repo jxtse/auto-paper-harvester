@@ -59,6 +59,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Inspect configuration and DOIs without downloading any files.",
     )
+    parser.add_argument(
+        "--use-browser-fallback",
+        action="store_true",
+        help=(
+            "After the HTTP/OA pipeline finishes, retry any DOI that failed using a "
+            "Playwright-driven Chromium session that reuses your institutional cookies. "
+            "Useful for ACS / RSC / IEEE / AIP / IOP / APS publishers that have no "
+            "public TDM API. Requires: pip install playwright && playwright install chromium."
+        ),
+    )
     parser.add_argument("--verbose", action="store_true", help="Enable debug logging.")
     return parser
 
@@ -86,13 +96,37 @@ def _log_publisher_summary(metrics: dict[str, dict[str, int]]) -> None:
         total_attempted = stats.get("attempted", 0)
         succeeded = stats.get("succeeded", 0)
         rate = (succeeded / total_attempted * 100) if total_attempted else 0.0
+        marker = " (browser fallback)" if publisher == "BrowserFallback" else ""
         LOGGER.info(
-            "  %s: %d/%d PDFs succeeded (%.1f%%)",
+            "  %s%s: %d/%d PDFs succeeded (%.1f%%)",
             publisher,
+            marker,
             succeeded,
             total_attempted,
             rate,
         )
+
+    # Surface the residual failures (DOIs that no path could recover) for the user.
+    residual: list[tuple[str, str]] = []
+    bf_attempted = metrics.get("BrowserFallback", {}).get("attempted", 0)
+    if bf_attempted:
+        # Browser-fallback was the last chance; its remaining failed_dois are residual.
+        for entry in metrics.get("BrowserFallback", {}).get("failed_dois", []) or []:
+            residual.append((entry.get("doi", "?"), entry.get("reason", "")))
+    else:
+        # No browser-fallback run; aggregate API-pipeline failures.
+        for publisher, stats in metrics.items():
+            if publisher == "BrowserFallback":
+                continue
+            for entry in stats.get("failed_dois", []) or []:
+                residual.append((entry.get("doi", "?"), entry.get("reason", "")))
+    if residual:
+        LOGGER.info("%d DOI(s) could not be downloaded:", len(residual))
+        for doi, reason in residual[:20]:  # cap noise; full list lives in logs/metrics
+            LOGGER.info("  - %s  (%s)", doi, reason)
+        if len(residual) > 20:
+            LOGGER.info("  ... and %d more (run with --verbose for the full list)",
+                        len(residual) - 20)
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -114,8 +148,8 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit(f"savedrecs input file(s) not found: {joined}")
 
     downloads: list[Path] = []
-    aggregate_metrics: defaultdict[str, dict[str, int]] = defaultdict(
-        lambda: {"attempted": 0, "succeeded": 0}
+    aggregate_metrics: defaultdict[str, dict[str, object]] = defaultdict(
+        lambda: {"attempted": 0, "succeeded": 0, "failed_dois": []}
     )
     try:
         for savedrecs_path in savedrecs_paths:
@@ -127,6 +161,7 @@ def main(argv: list[str] | None = None) -> None:
                 max_per_publisher=args.max_per_publisher,
                 overwrite=args.overwrite,
                 dry_run=args.dry_run,
+                use_browser_fallback=args.use_browser_fallback,
             )
             downloaded_paths = list(download_iter)
             downloads.extend(downloaded_paths)
@@ -134,8 +169,10 @@ def main(argv: list[str] | None = None) -> None:
             if iter_metrics:
                 for publisher, stats in iter_metrics.items():
                     entry = aggregate_metrics[publisher]
-                    entry["attempted"] += stats.get("attempted", 0)
-                    entry["succeeded"] += stats.get("succeeded", 0)
+                    entry["attempted"] = entry.get("attempted", 0) + stats.get("attempted", 0)
+                    entry["succeeded"] = entry.get("succeeded", 0) + stats.get("succeeded", 0)
+                    entry.setdefault("failed_dois", [])
+                    entry["failed_dois"].extend(stats.get("failed_dois", []) or [])
     except DownloadError as exc:
         LOGGER.error("Download aborted: %s", exc)
         raise SystemExit(1) from exc
