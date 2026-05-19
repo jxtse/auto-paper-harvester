@@ -129,8 +129,9 @@ python -m auto_paper_download --savedrecs savedrecs.xls --use-browser-fallback
 The first run opens a Chromium window so you can log into your university's SSO
 once. Cookies persist under `~/.cache/auto_paper_download/browser_profile/` (or the
 platform equivalent) for subsequent runs. See
-[SKILL.md → Browser fallback setup](.claude/skills/paper-download/SKILL.md#browser-fallback-setup-one-time)
-for cross-browser options (Chrome / Edge / Brave).
+[docs/BROWSER_FALLBACK.md](docs/BROWSER_FALLBACK.md)
+for cross-browser options (Chrome / Edge / Brave), headless vs headed, profile
+paths, and every `BROWSER_FALLBACK_*` env var.
 
 ### Common flags
 
