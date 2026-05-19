@@ -152,7 +152,83 @@ playwright install chromium      # ~150 MB, one-time
 
 First run will open a real Chromium window so the user can log into their
 institution's SSO once. Cookies persist under
-`~/.cache/auto_paper_download/browser_profile/` and carry over to subsequent runs.
+`~/.cache/auto_paper_download/browser_profile/` (Linux) or the platform-appropriate
+cache dir (see [Profile location](#profile-location)) and carry over to subsequent runs.
+
+### Browser choice
+
+By default the fallback uses **Playwright's bundled Chromium**. This is the most
+portable option: works the same on macOS / Linux / Windows, no system browser needed.
+
+If you'd rather reuse a system-wide browser (e.g. because you've already logged into
+SSO in Chrome / Edge / Brave on your daily-driver machine and don't want to redo it in
+a clean profile), set `BROWSER_FALLBACK_CHANNEL`. Playwright supports:
+
+| Channel value | Browser | Notes |
+|---|---|---|
+| (unset, default) | Bundled Chromium | Most portable; installed via `playwright install chromium` |
+| `chrome` | Google Chrome (stable) | Must be installed system-wide |
+| `chrome-beta` / `chrome-dev` / `chrome-canary` | Chrome pre-release channels | |
+| `msedge` | Microsoft Edge (stable) | Recommended on Windows |
+| `msedge-beta` / `msedge-dev` / `msedge-canary` | Edge pre-release channels | |
+
+Brave / Vivaldi / Arc / Opera aren't first-class Playwright channels but typically
+work by pointing `BROWSER_FALLBACK_PROFILE` at their Chromium-based profile dir
+(they share the same persistent context format).
+
+Example (macOS, reusing Chrome):
+
+```bash
+export BROWSER_FALLBACK_CHANNEL=chrome
+uv run python -m auto_paper_download --savedrecs savedrecs.xls --use-browser-fallback
+```
+
+### ⚠️ Persistent profile safety
+
+The browser fallback uses Playwright's `launch_persistent_context`, which writes to a
+real Chromium profile directory. By default we create a **dedicated, isolated profile**
+at the cache path below — so your real browsing session stays untouched.
+
+If you point `BROWSER_FALLBACK_PROFILE` at your real Chrome/Edge user-data dir
+(e.g. `~/Library/Application Support/Google/Chrome`), be aware that:
+
+- The browser **must be fully closed** while the fallback runs (Playwright needs
+  exclusive access to the profile lock).
+- Any extensions/sessions in that profile are loaded, including ad blockers that may
+  hide the PDF download button.
+- Running in headless mode against a real profile is brittle (many sites detect this).
+
+**Recommendation**: keep the default isolated profile and log into SSO once in the
+fallback's own window.
+
+### Profile location
+
+The persistent profile lives under a platform-specific cache directory by default:
+
+| Platform | Default profile path |
+|---|---|
+| Linux | `${XDG_CACHE_HOME:-~/.cache}/auto_paper_download/browser_profile/` |
+| macOS | `~/.cache/auto_paper_download/browser_profile/` (⚠️ currently — see below) |
+| Windows | `~/.cache/auto_paper_download/browser_profile/` (⚠️ currently — see below) |
+
+> ⚠️ **Known issue (v0.2.0)**: the current implementation hard-codes the Linux-style
+> `~/.cache/` path everywhere. Strictly speaking macOS profiles should live under
+> `~/Library/Caches/auto_paper_download/` and Windows under
+> `%LOCALAPPDATA%\auto_paper_download\`. The path still works on all three OSes —
+> just not in the platform-conventional location. Set `BROWSER_FALLBACK_PROFILE`
+> explicitly if this matters to you.
+
+### Headless vs headed (per platform)
+
+`BROWSER_FALLBACK_HEADLESS` overrides the default. When unset, the resolver picks:
+
+| Situation | Default | Why |
+|---|---|---|
+| `family == acs` or `wiley` | **headed** | Their SI capture is unreliable in headless mode |
+| macOS / Windows (desktop) | **headed** | Always have a display; user can complete SSO interactively |
+| Linux with `DISPLAY` or `WAYLAND_DISPLAY` | **headed** | X11/Wayland session detected |
+| Linux without display (CI, headless servers) | **headless** | No GUI available |
+| macOS via SSH without screen sharing | headed by default — **set `BROWSER_FALLBACK_HEADLESS=1`** | Heuristic can't detect this; explicit override is required |
 
 Useful env vars:
 
@@ -160,9 +236,18 @@ Useful env vars:
 |---|---|---|
 | `BROWSER_FALLBACK_ENABLED` | `1` | Set to `0` to disable globally (CI) |
 | `BROWSER_FALLBACK_HEADLESS` | auto | `1` forces headless, `0` forces headed |
-| `BROWSER_FALLBACK_CHANNEL` | `chromium` | Set `msedge` to use Edge instead |
-| `BROWSER_FALLBACK_PROFILE` | `~/.cache/.../browser_profile` | Override profile dir |
+| `BROWSER_FALLBACK_CHANNEL` | (bundled chromium) | `chrome` / `msedge` / `chrome-beta` / ... |
+| `BROWSER_FALLBACK_PROFILE` | platform cache path | Override profile dir |
 | `BROWSER_FALLBACK_AUTH_HOSTS` | (none) | Comma-list of extra SSO host substrings |
+
+### When to install Playwright Chromium vs use system Chrome
+
+| If you... | Use |
+|---|---|
+| Just want it to work, no extra setup | Default (`playwright install chromium`) |
+| Already have Chrome/Edge on the machine and don't want a second 150 MB download | `BROWSER_FALLBACK_CHANNEL=chrome` (or `msedge`) |
+| Are on Windows and have institutional SSO bookmarked in Edge | `BROWSER_FALLBACK_CHANNEL=msedge` (mirrors `ref-downloader`'s setup) |
+| Are running in CI / a Docker image / headless server | Default Chromium + `BROWSER_FALLBACK_HEADLESS=1` |
 
 ### Browser fallback behavior
 
