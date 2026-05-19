@@ -1,6 +1,6 @@
 [project]
 name = "auto-paper-download"
-version = "0.1.0"
+version = "0.2.0"
 description = "Automated PDF downloader for DOIs exported from Web of Science."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -9,6 +9,14 @@ dependencies = [
 ]
 authors = [
   { name = "Auto Paper Download" },
+]
+
+[project.optional-dependencies]
+# Playwright-driven browser fallback for paywalled publishers without a TDM API
+# (ACS / RSC / IEEE / AIP / IOP / APS / Annual Reviews / Taylor & Francis / etc.).
+# Install with:  pip install 'auto-paper-download[browser]'  &&  playwright install chromium
+browser = [
+  "playwright>=1.40",
 ]
 
 [project.scripts]

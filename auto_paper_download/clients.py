@@ -1130,8 +1130,9 @@ def batched_download(
         metrics_entry: Optional[dict[str, int]] = None
         if metrics is not None:
             metrics_entry = metrics.setdefault(
-                publisher_label, {"attempted": 0, "succeeded": 0}
+                publisher_label, {"attempted": 0, "succeeded": 0, "failed_dois": []}
             )
+            metrics_entry.setdefault("failed_dois", [])
             metrics_entry["attempted"] += 1
         article_dir: Optional[Path] = None
         pdf_downloaded = False
@@ -1239,6 +1240,17 @@ def batched_download(
                                 "Springer DOI %s 跳过：需订阅访问，手动登录后再获取 PDF。", record.doi
                             )
                             _cleanup_article_dir(article_dir)
+                            # Record this so an optional outer pass (e.g. the
+                            # Playwright browser fallback) can retry. Without this
+                            # line, paywalled Springer DOIs are silently dropped
+                            # and the browser pass never sees them.
+                            if metrics_entry is not None:
+                                metrics_entry["failed_dois"].append({
+                                    "doi": record.doi,
+                                    "reason": f"springer_subscription_required: {exc}",
+                                })
+                            if delay_seconds:
+                                time.sleep(delay_seconds)
                             continue
                         raise
                     pdf_path = fallback
@@ -1325,6 +1337,11 @@ def batched_download(
         except Exception as exc:  # noqa: BLE001
             if article_dir:
                 _cleanup_article_dir(article_dir)
+            # Record failed DOIs so an outer caller (e.g. browser fallback) can retry.
+            if metrics_entry is not None and record.doi:
+                metrics_entry["failed_dois"].append(
+                    {"doi": record.doi, "reason": f"{type(exc).__name__}: {exc}"}
+                )
             if isinstance(exc, DownloadError):
                 LOGGER.warning(
                     "Skipping %s (%s)：%s",

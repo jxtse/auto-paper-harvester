@@ -96,6 +96,15 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Inspect configuration and publisher routing without downloading any files.",
     )
+    parser.add_argument(
+        "--use-browser-fallback",
+        action="store_true",
+        help=(
+            "After API/OA download fails, retry via Playwright + Chromium reusing "
+            "your institutional cookies. Needed for ACS/RSC/IEEE/AIP/IOP/APS. "
+            "Requires: pip install playwright && playwright install chromium"
+        ),
+    )
     # Resilience and batching
     parser.add_argument(
         "--resume",
@@ -203,6 +212,7 @@ def main(argv: list[str] | None = None) -> None:
                     max_per_publisher=args.max_per_publisher,
                     overwrite=args.overwrite,
                     dry_run=True,
+                    use_browser_fallback=args.use_browser_fallback,
                 )
             )
         except DownloadError as exc:
@@ -222,6 +232,7 @@ def main(argv: list[str] | None = None) -> None:
                     max_per_publisher=args.max_per_publisher,
                     overwrite=args.overwrite,
                     dry_run=False,
+                    use_browser_fallback=args.use_browser_fallback,
                 )
             )
             if paths:

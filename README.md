@@ -7,12 +7,24 @@ on the landing page. Each article ends up in
 `downloads/pdfs/<doi-slug>/` with the main PDF named after the DOI slug,
 plus any SI files located during scraping.
 
-Supported sources:
-- Wiley Text & Data Mining API
-- Elsevier Text & Data Mining API
-- Springer Nature Open Access API (open access content only)
-- OpenAlex (open access copies)
-- Crossref / Unpaywall (fallback when OpenAlex succeeds partially)
+**v0.2.0 highlights**
+- Publisher router rewritten — now recognises **24 DOI prefixes** across 19 publisher
+  families (was 4). See [docs/SUPPORTED_PUBLISHERS.md](docs/SUPPORTED_PUBLISHERS.md).
+- New **`--use-browser-fallback`** flag: after the HTTP/OA pipeline finishes, retry
+  every failed DOI through a Playwright-driven Chromium session that reuses the user's
+  institutional cookies. Lifts ACS / RSC / IEEE / AIP / IOP / APS from "always-fails"
+  to "usually-works" for institutional users.
+- Failed-DOI tracking + per-publisher residual-failure summary in the CLI output.
+- Skill (`.claude/skills/paper-download/SKILL.md`) rewritten in agent-runbook style with
+  trigger phrases, pre-flight checklist, output layout, and per-publisher tier table.
+
+## Supported sources
+
+| Layer | Sources |
+|---|---|
+| Publisher TDM APIs | Wiley, Elsevier |
+| OA APIs | Springer Nature OA, OpenAlex, Crossref, Unpaywall |
+| Browser fallback (opt-in) | ACS, RSC, IEEE, AIP, IOP, APS, AAAS/Science, Nature, Annual Reviews, Taylor & Francis, ECS, AVS, OSA, KPS, PNAS, ... |
 
 Download throughput is automatically throttled to satisfy TDM rate limits.
 
@@ -29,6 +41,186 @@ Download throughput is automatically throttled to satisfy TDM rate limits.
    ```bash
    uv run python -m auto_paper_download --savedrecs savedrecs.xls (Optional: Specify xls files for targeted downloads.)
    ```
+
+### (Optional) Enable browser fallback for paywalled publishers
+
+For publishers without a public TDM API (ACS, RSC, IEEE, AIP, IOP, APS, ...), enable
+the Playwright-driven fallback. It reuses your existing institutional SSO session, so
+paywalled DOIs your university subscribes to become downloadable.
+
+```bash
+pip install 'auto-paper-download[browser]'   # or: pip install playwright
+playwright install chromium                   # ~150 MB, one-time
+
+uv run python -m auto_paper_download \
+  --savedrecs savedrecs.xls \
+  --use-browser-fallback
+```
+
+First run opens a real Chromium window — log into your institution's SSO once,
+and the cookies persist under `~/.cache/auto_paper_download/browser_profile/` for
+all subsequent runs.
+
+See [docs/SUPPORTED_PUBLISHERS.md](docs/SUPPORTED_PUBLISHERS.md) for the per-publisher
+tier table, and the [paper-download SKILL.md](.claude/skills/paper-download/SKILL.md)
+for full configuration of the browser fallback.
+
+## For AI Agents
+
+> **You're an AI agent (Claude / Codex / Copilot / Cursor / Gemini / etc.) and a user
+> just pointed you at this repo asking you to "install it as a skill"?** This section
+> tells you exactly what to do. Read this whole section before running anything.
+
+### What this repo provides
+
+- A Python package `auto_paper_download` that downloads paper PDFs by DOI.
+- A pre-packaged **skill** at `.claude/skills/paper-download/` (SKILL.md + runnable
+  scripts) that wraps the package for agent use.
+- The skill's `SKILL.md` carries a `name:` + `description:` frontmatter so most agent
+  frameworks can auto-route paper-download requests to it.
+
+### Where to install the skill (pick ONE that matches your framework)
+
+```bash
+git clone https://github.com/jxtse/auto-paper-harvester.git
+cd auto-paper-harvester
+
+# Pick the install destination that matches your agent framework:
+
+# Claude Code (CLI or VS Code extension):
+cp -r .claude/skills/paper-download ~/.claude/skills/
+
+# Claude Agent SDK (auto-discovers ~/.claude/skills/):
+cp -r .claude/skills/paper-download ~/.claude/skills/
+
+# Codex CLI:
+cp -r .claude/skills/paper-download ~/.codex/skills/
+
+# Copilot CLI / VS Code agent (project-local):
+mkdir -p .github/skills && cp -r .claude/skills/paper-download .github/skills/
+
+# OpenClaw / other frameworks that auto-discover ~/.openclaw/skills/:
+cp -r .claude/skills/paper-download ~/.openclaw/skills/
+
+# Project-local (always works, framework-agnostic):
+mkdir -p .agents/skills && cp -r .claude/skills/paper-download .agents/skills/
+```
+
+### Then install the runtime deps
+
+The skill protocol doesn't manage Python deps. The skill **only contains `SKILL.md`
++ wrapper scripts** — it imports the `auto_paper_download` package, which must be
+installed separately. Pick one of two paths:
+
+#### Option A: Install the package from the cloned repo (recommended)
+
+```bash
+# From the cloned repo root:
+pip install -e .                # core: API/OA pipeline only
+# OR, to also enable Playwright browser fallback for paywalled publishers:
+pip install -e '.[browser]' && playwright install chromium     # ~150 MB Chromium
+```
+
+`pip install -e .` puts `auto_paper_download` on the Python path globally, so the
+skill scripts (wherever you copied them) can `import auto_paper_download`. This is
+the simplest setup and works the same on macOS / Linux / Windows.
+
+> **Requires pip ≥ 21.3** for editable installs (PEP 660). If you see
+> `editable mode currently requires a setuptools-based build`, upgrade pip first:
+> `python -m pip install --upgrade pip`.
+
+#### Option B: Keep using the cloned repo as-is
+
+If you'd rather not install anything, you can run the skill scripts **from inside
+the cloned repo root** (the scripts auto-detect the package via
+`pyproject.toml` / `auto_paper_download/` sibling lookup):
+
+```bash
+cd auto-paper-harvester       # the cloned repo root
+python .claude/skills/paper-download/scripts/download_by_doi.py --doi <DOI>
+```
+
+In this mode the skill scripts must stay inside the repo; copying them out to
+`~/.claude/skills/` etc. **will not work** without Option A.
+
+> ⚠️ **Don't** try `pip install requests` alone after copying the skill out. The
+> skill scripts import `auto_paper_download`, which isn't on PyPI under that name
+> (it's only available via this repo, installed via `pip install -e .`).
+
+### Then configure credentials (one-time)
+
+The skill reads from a `.env` file in the **current working directory** (whatever cwd
+the agent runs commands in). The `.env.example` template lives in the cloned
+**repo root** (not in the copied-out skill dir), so:
+
+```bash
+# From the cloned repo root:
+cp .env.example .env
+# Then edit .env. At minimum set ONE of CROSSREF_MAILTO / OPENALEX_MAILTO to a
+# real email address (their public APIs require this for polite-pool access).
+# Other credentials (WILEY_TDM_TOKEN, ELSEVIER_API_KEY, SPRINGER_API_KEY,
+# UNPAYWALL_EMAIL) are all optional — missing ones just disable that path.
+```
+
+If you copied the skill to `~/.claude/skills/` (Option A), keep a copy of `.env`
+in whatever directory you actually run the agent from — that's the cwd the skill
+scripts will read.
+
+If the user hasn't set any creds: **don't fail silently**. The skill will warn that
+publishers are disabled — surface that warning to the user verbatim and ask them to
+edit `.env`.
+
+### How to invoke the skill
+
+The skill exposes two runnable entry points:
+
+```bash
+# Single DOI
+python <skill_dir>/scripts/download_by_doi.py --doi <DOI> [--use-browser-fallback]
+
+# Multiple DOIs (flag-repeat or file)
+python <skill_dir>/scripts/download_multiple_dois.py \
+  --doi-file dois.txt \
+  [--resume] [--batch-size N] [--use-browser-fallback]
+```
+
+Or (if the user wants the original WoS bulk path):
+
+```bash
+uv run python -m auto_paper_download --savedrecs savedrecs.xls [--use-browser-fallback]
+```
+
+### Decisions you should make automatically
+
+1. **Enable `--use-browser-fallback`?** Yes, if the DOI list contains any of these
+   prefixes: `10.1021` (ACS), `10.1039` (RSC), `10.1126` (Science), `10.1109` (IEEE),
+   `10.1063` (AIP), `10.1088` (IOP), `10.1103` (APS), `10.1146` (Annual Reviews),
+   `10.1080` (Taylor & Francis). These publishers have **no public TDM API**, so
+   without browser fallback they always fail.
+2. **Recommend `--resume` + `--batch-size`** for any DOI file with >100 entries —
+   protects against network drops.
+3. **Don't enable `--overwrite`** unless the user asked for it. PDFs already on disk
+   should be cached.
+4. **First run with `--use-browser-fallback`** will open a real Chromium window for
+   institutional SSO. Warn the user before launching: *"A browser window will open;
+   please complete your university login once and the cookies will be cached."*
+
+### Pre-flight checklist (run through this before downloading)
+
+1. **Is the user's institution affiliated with the publishers in the DOI list?** Browser
+   fallback only works for content their institution actually subscribes to. For pure
+   open-access lists, browser fallback adds nothing over Unpaywall.
+2. **Are the DOIs valid?** Format check: each line should match `10.\d{4,9}/.+`. The
+   skill silently skips malformed DOIs.
+3. **Did the user expose the output dir?** Default is `./downloads/pdfs/`. If running
+   on the user's machine, confirm that's where they want files.
+
+### See also
+
+- [.claude/skills/paper-download/SKILL.md](.claude/skills/paper-download/SKILL.md) —
+  the full agent runbook (trigger phrases, output layout, troubleshooting).
+- [docs/SUPPORTED_PUBLISHERS.md](docs/SUPPORTED_PUBLISHERS.md) — per-publisher
+  routing + which tier each one is in.
 
 ## Automated Workflow with Claude Code
 
@@ -113,6 +305,7 @@ Common options:
 - `--delay`: seconds between requests (defaults to 1.5, enforced minimum 1.0)
 - `--overwrite`: re-download files even if they already exist
 - `--dry-run`: inspect the detected DOIs and publisher configuration without downloading
+- `--use-browser-fallback`: after HTTP/OA paths fail, retry via Playwright + Chromium using your institutional SSO cookies (one-time `pip install 'auto-paper-download[browser]' && playwright install chromium`)
 - `--verbose`: emit debug logs for troubleshooting
 
 During a normal run the tool prints a download plan indicating how many DOIs will be

@@ -68,6 +68,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Inspect configuration and publisher routing without downloading any files.",
     )
     parser.add_argument(
+        "--use-browser-fallback",
+        action="store_true",
+        help=(
+            "After API/OA download fails, retry via Playwright + Chromium reusing "
+            "your institutional cookies. Needed for ACS/RSC/IEEE/AIP/IOP/APS. "
+            "Requires: pip install playwright && playwright install chromium"
+        ),
+    )
+    parser.add_argument(
         "--verbose",
         action="store_true",
         help="Enable debug logging.",
@@ -96,6 +105,7 @@ def main(argv: list[str] | None = None) -> None:
                 delay_seconds=args.delay,
                 overwrite=args.overwrite,
                 dry_run=args.dry_run,
+                use_browser_fallback=args.use_browser_fallback,
             )
         )
     except DownloadError as exc:
