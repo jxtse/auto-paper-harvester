@@ -108,38 +108,63 @@ mkdir -p .agents/skills && cp -r .claude/skills/paper-download .agents/skills/
 
 ### Then install the runtime deps
 
-The skill protocol doesn't manage Python deps. After copying the skill:
+The skill protocol doesn't manage Python deps. The skill **only contains `SKILL.md`
++ wrapper scripts** — it imports the `auto_paper_download` package, which must be
+installed separately. Pick one of two paths:
+
+#### Option A: Install the package from the cloned repo (recommended)
 
 ```bash
-cd <where-you-copied-the-skill>/paper-download   # or the cloned repo root
-
-# Core: API/OA pipeline only
-pip install requests       # this is the only hard dep
-
-# Recommended: enable Playwright browser fallback for paywalled publishers
-#   (ACS / RSC / IEEE / AIP / IOP / APS / Annual Reviews / Taylor & Francis / ...)
-pip install playwright
-playwright install chromium     # ~150 MB, one-time
+# From the cloned repo root:
+pip install -e .                # core: API/OA pipeline only
+# OR, to also enable Playwright browser fallback for paywalled publishers:
+pip install -e '.[browser]' && playwright install chromium     # ~150 MB Chromium
 ```
 
-Or install everything via the project's optional extras:
+`pip install -e .` puts `auto_paper_download` on the Python path globally, so the
+skill scripts (wherever you copied them) can `import auto_paper_download`. This is
+the simplest setup and works the same on macOS / Linux / Windows.
+
+> **Requires pip ≥ 21.3** for editable installs (PEP 660). If you see
+> `editable mode currently requires a setuptools-based build`, upgrade pip first:
+> `python -m pip install --upgrade pip`.
+
+#### Option B: Keep using the cloned repo as-is
+
+If you'd rather not install anything, you can run the skill scripts **from inside
+the cloned repo root** (the scripts auto-detect the package via
+`pyproject.toml` / `auto_paper_download/` sibling lookup):
 
 ```bash
-pip install 'auto-paper-download[browser]' && playwright install chromium
+cd auto-paper-harvester       # the cloned repo root
+python .claude/skills/paper-download/scripts/download_by_doi.py --doi <DOI>
 ```
+
+In this mode the skill scripts must stay inside the repo; copying them out to
+`~/.claude/skills/` etc. **will not work** without Option A.
+
+> ⚠️ **Don't** try `pip install requests` alone after copying the skill out. The
+> skill scripts import `auto_paper_download`, which isn't on PyPI under that name
+> (it's only available via this repo, installed via `pip install -e .`).
 
 ### Then configure credentials (one-time)
 
 The skill reads from a `.env` file in the **current working directory** (whatever cwd
-the agent runs commands in). Copy the template and fill in what you have:
+the agent runs commands in). The `.env.example` template lives in the cloned
+**repo root** (not in the copied-out skill dir), so:
 
 ```bash
+# From the cloned repo root:
 cp .env.example .env
 # Then edit .env. At minimum set ONE of CROSSREF_MAILTO / OPENALEX_MAILTO to a
 # real email address (their public APIs require this for polite-pool access).
 # Other credentials (WILEY_TDM_TOKEN, ELSEVIER_API_KEY, SPRINGER_API_KEY,
 # UNPAYWALL_EMAIL) are all optional — missing ones just disable that path.
 ```
+
+If you copied the skill to `~/.claude/skills/` (Option A), keep a copy of `.env`
+in whatever directory you actually run the agent from — that's the cwd the skill
+scripts will read.
 
 If the user hasn't set any creds: **don't fail silently**. The skill will warn that
 publishers are disabled — surface that warning to the user verbatim and ask them to
