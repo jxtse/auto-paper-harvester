@@ -306,26 +306,41 @@ def _execute_download(
         disabled_publishers.append(f"{publisher_name}: {reason}")
         records = [rec for rec in records if rec.publisher != publisher_name]
 
+    def _disable_or_keep_for_fallback(publisher_name: str, reason: str) -> None:
+        """
+        When ``use_browser_fallback`` is on, keep records of this publisher in the
+        pipeline so they end up in ``failed_dois`` and the browser pass can pick them
+        up (their primary client is missing, so they'll all fail — which is fine).
+        Otherwise behave like the old ``disable_publisher``.
+        """
+        if use_browser_fallback:
+            LOGGER.info(
+                "%s client unavailable (%s); records retained for browser fallback.",
+                publisher_name, reason,
+            )
+            return
+        disable_publisher(publisher_name, reason)
+
     wiley_client: Optional[WileyClient] = None
     if has_records("Wiley"):
         try:
             wiley_client = WileyClient()
         except ValueError as exc:
-            disable_publisher("Wiley", str(exc))
+            _disable_or_keep_for_fallback("Wiley", str(exc))
 
     elsevier_client: Optional[ElsevierClient] = None
     if has_records("Elsevier"):
         try:
             elsevier_client = ElsevierClient()
         except ValueError as exc:
-            disable_publisher("Elsevier", str(exc))
+            _disable_or_keep_for_fallback("Elsevier", str(exc))
 
     springer_client: Optional[SpringerClient] = None
     if has_records("Springer"):
         try:
             springer_client = SpringerClient()
         except ValueError as exc:
-            disable_publisher("Springer", str(exc))
+            _disable_or_keep_for_fallback("Springer", str(exc))
 
     crossref_client: Optional[CrossrefClient] = None
     openalex_client: Optional[OpenAlexClient] = None
@@ -345,7 +360,19 @@ def _execute_download(
         if not crossref_client and not openalex_client:
             reason_parts = [part for part in (crossref_error, openalex_error) if part]
             reason = "; ".join(reason_parts) or "no Crossref/OpenAlex credentials available"
-            disable_publisher("Crossref", reason)
+            if use_browser_fallback:
+                # IMPORTANT: With browser fallback enabled we must keep these records in
+                # the pipeline. They include ACS/RSC/IEEE/AIP/IOP/APS DOIs (mapped to
+                # the legacy 'Crossref' bucket by publishers.family_to_legacy_publisher)
+                # whose ONLY realistic download path is the browser pass. Removing them
+                # here would short-circuit the entire fallback (they'd never appear in
+                # ``failed_dois`` for the second pass to pick up).
+                LOGGER.info(
+                    "Crossref/OpenAlex unavailable (%s); records retained for browser fallback.",
+                    reason,
+                )
+            else:
+                disable_publisher("Crossref", reason)
 
     unpaywall_client: Optional[UnpaywallClient] = None
     try:

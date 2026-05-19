@@ -1240,6 +1240,17 @@ def batched_download(
                                 "Springer DOI %s 跳过：需订阅访问，手动登录后再获取 PDF。", record.doi
                             )
                             _cleanup_article_dir(article_dir)
+                            # Record this so an optional outer pass (e.g. the
+                            # Playwright browser fallback) can retry. Without this
+                            # line, paywalled Springer DOIs are silently dropped
+                            # and the browser pass never sees them.
+                            if metrics_entry is not None:
+                                metrics_entry["failed_dois"].append({
+                                    "doi": record.doi,
+                                    "reason": f"springer_subscription_required: {exc}",
+                                })
+                            if delay_seconds:
+                                time.sleep(delay_seconds)
                             continue
                         raise
                     pdf_path = fallback

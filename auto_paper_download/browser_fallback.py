@@ -256,20 +256,38 @@ def browser_fallback_download(
                         diagnostics={"final_url": landed},
                     )
 
-                # 2. Look for a PDF link/button using publisher-specific selectors
+                # 2. Look for a PDF link/button using publisher-specific selectors.
+                # We resolve the first matching locator OUTSIDE expect_download so a
+                # missing button returns immediately as ``no_link`` instead of waiting
+                # the full download timeout (the previous implementation entered
+                # expect_download() before the selector check, so even early returns
+                # blocked for ~60s waiting for a download event that never fired).
                 selectors = list(PUBLISHER_PDF_SELECTORS.get(publisher_family, ()))
                 selectors.extend(GENERIC_PDF_SELECTORS)
 
-                with page.expect_download(timeout=DEFAULT_DOWNLOAD_TIMEOUT_MS) as dl_info:
-                    clicked = _click_first_match(page, selectors)
-                    if not clicked:
-                        return BrowserFallbackResult(
-                            available=True, success=False, status="no_link",
-                            reason=f"No PDF affordance matched on {landed!r}",
-                            diagnostics={"final_url": landed, "tried_selectors": len(selectors)},
-                        )
-                download = dl_info.value
-                download.save_as(str(target_path))
+                target_locator = _resolve_first_match(page, selectors)
+                if target_locator is None:
+                    return BrowserFallbackResult(
+                        available=True, success=False, status="no_link",
+                        reason=f"No PDF affordance matched on {landed!r}",
+                        diagnostics={"final_url": landed, "tried_selectors": len(selectors)},
+                    )
+
+                try:
+                    with page.expect_download(timeout=DEFAULT_DOWNLOAD_TIMEOUT_MS) as dl_info:
+                        target_locator.click(timeout=5_000)
+                    download = dl_info.value
+                    download.save_as(str(target_path))
+                except Exception as exc:  # noqa: BLE001 — click ok but no download event
+                    return BrowserFallbackResult(
+                        available=True, success=False, status="challenge_timeout",
+                        reason=(
+                            f"Clicked PDF link but no download fired within "
+                            f"{DEFAULT_DOWNLOAD_TIMEOUT_MS//1000}s (likely SSO/CAPTCHA challenge): "
+                            f"{type(exc).__name__}: {exc}"
+                        ),
+                        diagnostics={"final_url": landed},
+                    )
 
                 if not _is_pdf(target_path):
                     return BrowserFallbackResult(
@@ -317,8 +335,15 @@ def _resolve_headless(explicit: Optional[bool], family: str) -> bool:
     # Empirically, ACS / Wiley SI capture works less well in headless mode.
     if family in {"acs", "wiley"}:
         return False
-    # Otherwise: headed if we have a display, headless if not.
-    return not bool(os.environ.get("DISPLAY") or os.uname().sysname == "Darwin")
+    # Otherwise: headed when we can see a window (Windows / macOS / Linux with DISPLAY),
+    # headless on truly headless Linux boxes (e.g. CI, server SSH).
+    # ``os.uname`` is POSIX-only; ``platform.system()`` is cross-platform.
+    import platform
+    system = platform.system()  # "Windows" | "Darwin" | "Linux" | ...
+    if system in {"Windows", "Darwin"}:
+        return False  # Always have a display on desktop OSes
+    # Linux / other Unix: headed only when DISPLAY (X11) or WAYLAND_DISPLAY is set
+    return not bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
 
 
 def _default_profile_dir() -> Path:
@@ -352,21 +377,41 @@ def _looks_like_auth_redirect(url: str) -> bool:
     return False
 
 
-def _click_first_match(page, selectors: Sequence[str]) -> bool:
-    """Try each CSS selector; click the first one that resolves to a visible element."""
+def _resolve_first_match(page, selectors: Sequence[str]):
+    """Return the first Locator that resolves to a visible element, or ``None``.
+
+    Split out from clicking so the caller can decide whether to enter a
+    ``page.expect_download()`` context. Putting the selector probe inside that context
+    would block until the download timeout fires when no PDF link exists at all.
+    """
     for sel in selectors:
         try:
             locator = page.locator(sel).first
             if locator.count() == 0:
                 continue
             locator.scroll_into_view_if_needed(timeout=2_000)
-            locator.click(timeout=5_000)
-            LOGGER.debug("Browser fallback: clicked selector %r", sel)
-            return True
+            LOGGER.debug("Browser fallback: resolved selector %r", sel)
+            return locator
         except Exception as exc:  # noqa: BLE001 — best-effort; try next selector
             LOGGER.debug("Selector %r failed: %s", sel, exc)
             continue
-    return False
+    return None
+
+
+def _click_first_match(page, selectors: Sequence[str]) -> bool:
+    """Try each CSS selector; click the first one that resolves to a visible element.
+
+    Retained for callers that don't need to drive ``expect_download()`` themselves.
+    """
+    locator = _resolve_first_match(page, selectors)
+    if locator is None:
+        return False
+    try:
+        locator.click(timeout=5_000)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.debug("Resolved selector failed to click: %s", exc)
+        return False
 
 
 def _is_pdf(path: Path) -> bool:
