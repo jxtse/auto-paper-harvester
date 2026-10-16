@@ -28,3 +28,4 @@ settings.json
 /.build-venv
 /dist
 /build
+!packaging/README-executable.txt
