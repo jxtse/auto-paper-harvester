@@ -176,7 +176,7 @@ def _settings_home_env() -> None:
 
 
 def _cmd_get(argv: list[str]) -> None:
-    from .downloader import download_from_dois, extract_dois_from_text, unresolved_dois
+    from .downloader import NO_LEDGER, download_from_dois, extract_dois_from_text, unresolved_dois
 
     p = argparse.ArgumentParser(prog="auto-paper-download get",
                                 description="Download papers by DOI.")
@@ -201,7 +201,7 @@ def _cmd_get(argv: list[str]) -> None:
     _settings_home_env()
     from .webui import DEFAULT_LEDGER
 
-    ledger = None if a.no_ledger else Ledger(
+    ledger = NO_LEDGER if a.no_ledger else Ledger(
         a.ledger or Path(os.environ.get("AUTO_PAPER_LEDGER") or DEFAULT_LEDGER))
     stream = download_from_dois(dois=dois, output_dir=a.output_dir, overwrite=a.overwrite,
                                 dry_run=a.dry_run, load_env=False,

@@ -68,6 +68,10 @@ def load_env_file(path: Path | str = ".env") -> bool:
 
 BROWSER_BUCKETS = ("BrowserFallback", "RealBrowser")
 
+#: Pass as ``ledger=`` to turn caps and pacing off even when ``AUTO_PAPER_LEDGER`` is set
+#: (``None`` means "use the environment").
+NO_LEDGER = object()
+
 
 def unresolved_dois(metrics: dict) -> list[dict]:
     """DOIs that no step delivered, with the last reason, from a stream's ``metrics``.
@@ -85,13 +89,13 @@ def unresolved_dois(metrics: dict) -> list[dict]:
         bucket = metrics.get(name)
         if not bucket:
             continue
-        failed_here = {e.get("doi"): e for e in bucket.get("failed_dois", []) or []}
-        for doi in list(last):
-            if doi in failed_here:
-                last[doi] = failed_here[doi]
-            elif bucket.get("attempted"):
-                # tried in the browser and not reported as failed: recovered
-                last.pop(doi, None)
+        for e in bucket.get("failed_dois", []) or []:
+            if e.get("doi") in last:
+                last[e["doi"]] = e
+        # Only DOIs the browser actually reached and saved are resolved; a pass that stopped
+        # early (challenge, cap) leaves the rest with their earlier reason.
+        for doi in bucket.get("recovered_dois", []) or []:
+            last.pop(doi, None)
     return list(last.values())
 
 
@@ -302,7 +306,9 @@ def download_from_dois(
     """
     if load_env:
         load_env_file()
-    if ledger is None:
+    if ledger is NO_LEDGER:
+        ledger = None
+    elif ledger is None:
         ledger = Ledger.from_env()
 
     doi_list = list(dois)
@@ -553,7 +559,7 @@ def _iter_browser_fallback(
             doi_to_family[rec.doi] = info.family if info else "unknown"
 
     fallback_bucket = metrics.setdefault(
-        "BrowserFallback", {"attempted": 0, "succeeded": 0, "failed_dois": []}
+        "BrowserFallback", {"attempted": 0, "succeeded": 0, "failed_dois": [], "recovered_dois": []}
     )
     LOGGER.info("Browser fallback: retrying %d failed DOIs", len(failed))
 
@@ -589,6 +595,7 @@ def _iter_browser_fallback(
                 ledger.block(host, f"challenge: {result.reason}"[:200])
         if result.success and result.saved_path is not None:
             fallback_bucket["succeeded"] += 1
+            fallback_bucket.setdefault("recovered_dois", []).append(doi)
             LOGGER.info("Browser fallback recovered %s -> %s", doi, result.saved_path)
             yield result.saved_path
         else:
@@ -616,7 +623,7 @@ def _iter_real_browser(
     from .real_browser import RealBrowser
 
     bucket = metrics.setdefault(
-        "RealBrowser", {"attempted": 0, "succeeded": 0, "failed_dois": []}
+        "RealBrowser", {"attempted": 0, "succeeded": 0, "failed_dois": [], "recovered_dois": []}
     )
     browser = RealBrowser(ledger=ledger)
     ok, why = browser.available()
@@ -636,6 +643,7 @@ def _iter_real_browser(
                 bucket["attempted"] += 1
             if result.success and result.saved_path is not None:
                 bucket["succeeded"] += 1
+                bucket.setdefault("recovered_dois", []).append(doi)
                 LOGGER.info("Real browser recovered %s -> %s", doi, result.saved_path)
                 yield result.saved_path
                 continue

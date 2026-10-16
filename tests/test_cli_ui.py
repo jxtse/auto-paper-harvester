@@ -42,12 +42,40 @@ def test_unresolved_dois_prefers_browser_outcome():
         "Wiley": {"attempted": 2, "succeeded": 0,
                   "failed_dois": [{"doi": "10.1/a", "reason": "oa 403"},
                                   {"doi": "10.1/b", "reason": "oa 403"}]},
-        "RealBrowser": {"attempted": 2, "succeeded": 1,
+        "RealBrowser": {"attempted": 2, "succeeded": 1, "recovered_dois": ["10.1/a"],
                         "failed_dois": [{"doi": "10.1/b", "reason": "challenge_timeout"}]},
     }
     assert downloader.unresolved_dois(metrics) == [{"doi": "10.1/b", "reason": "challenge_timeout"}]
     no_browser = {"Wiley": metrics["Wiley"]}
     assert [e["doi"] for e in downloader.unresolved_dois(no_browser)] == ["10.1/a", "10.1/b"]
+
+
+def test_unresolved_keeps_dois_the_browser_pass_never_reached():
+    # browser saved a, hit a challenge on b and stopped; c was never tried
+    metrics = {
+        "Elsevier": {"attempted": 3, "succeeded": 0, "failed_dois": [
+            {"doi": d, "reason": "no OA"} for d in ("10.1/a", "10.1/b", "10.1/c")]},
+        "RealBrowser": {"attempted": 2, "succeeded": 1, "recovered_dois": ["10.1/a"],
+                        "failed_dois": [{"doi": "10.1/b", "reason": "challenge: x"}]},
+    }
+    got = {e["doi"]: e["reason"] for e in downloader.unresolved_dois(metrics)}
+    assert got == {"10.1/b": "challenge: x", "10.1/c": "no OA"}
+
+
+def test_no_ledger_beats_environment(home, monkeypatch):
+    monkeypatch.setenv("AUTO_PAPER_LEDGER", str(home / "env.sqlite"))
+    seen = {}
+
+    def fake_execute(**kw):
+        seen["ledger"] = kw.get("ledger")
+        return iter(())
+
+    monkeypatch.setattr(downloader, "_execute_download", fake_execute)
+    list(downloader.download_from_dois(dois=["10.1/a"], output_dir=home, load_env=False,
+                                       ledger=downloader.NO_LEDGER))
+    assert seen["ledger"] is None
+    list(downloader.download_from_dois(dois=["10.1/a"], output_dir=home, load_env=False))
+    assert seen["ledger"] is not None and str(seen["ledger"].path).endswith("env.sqlite")
 
 
 def test_get_extracts_dois_and_prints_json(home, monkeypatch, capsys):
@@ -66,6 +94,8 @@ def test_get_extracts_dois_and_prints_json(home, monkeypatch, capsys):
     out = json.loads(capsys.readouterr().out)
     assert seen["dois"] == ["10.1016/j.x.1", "10.1002/y.2"]
     assert seen["ledger"].path == webui.DEFAULT_LEDGER  # caps on by default
+    cli.main(["get", "10.1016/j.x.1", "--no-ledger", "-o", str(home / "p"), "--json"])
+    assert seen["ledger"] is downloader.NO_LEDGER
     assert out["requested"] == 2 and len(out["pdfs"]) == 1 and out["failed"][0]["doi"] == "10.1002/y.2"
 
 
