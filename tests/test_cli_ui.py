@@ -228,3 +228,13 @@ def test_ui_moves_to_next_port_when_taken(home, monkeypatch):
     finally:
         busy.close()
     assert seen["port"] == port + 1
+
+
+def test_cli_survives_a_legacy_console_encoding(tmp_path):
+    import subprocess
+    import sys
+    env = dict(os.environ, PYTHONIOENCODING="cp1252", AUTO_PAPER_HOME=str(tmp_path))
+    out = subprocess.run([sys.executable, "-m", "auto_paper_download", "skill"],
+                         capture_output=True, env=env, timeout=60)
+    assert out.returncode == 0, out.stderr.decode("utf-8", "replace")[-400:]
+    assert out.stdout.startswith(b"---")
