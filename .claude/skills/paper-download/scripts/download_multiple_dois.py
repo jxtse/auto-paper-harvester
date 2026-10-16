@@ -38,6 +38,7 @@ from auto_paper_download.ratelimit import Ledger
 from auto_paper_download.downloader import (
     DEFAULT_DELAY_SECONDS,
     download_from_dois,
+    load_env_file,
 )
 
 
@@ -162,6 +163,7 @@ def main(argv: list[str] | None = None) -> None:
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     )
+    load_env_file()  # before the ledger, so .env limits apply
     ledger = Ledger(args.ledger) if args.ledger else Ledger.from_env()
 
     raw_dois: list[str] = []

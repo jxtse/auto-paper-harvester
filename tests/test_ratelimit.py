@@ -10,6 +10,7 @@ import requests
 
 from auto_paper_download.ratelimit import (
     HostLimited,
+    challenge_page,
     Ledger,
     LimitReached,
     PacedAdapter,
@@ -330,3 +331,87 @@ def test_adapter_plain_403_and_429(tmp_path, monkeypatch):
     s2, _ = _session_with(led, monkeypatch, status=429, body=b"")
     s2.get("https://api.example.com/x")
     assert led.cooling("api.example.com")
+
+
+def test_adapter_200_challenge_page_refused_and_cools_down(tmp_path, monkeypatch):
+    monkeypatch.setattr(ratelimit.time, "sleep", lambda s: None)
+    led = _ledger(tmp_path)
+    body = b'<!DOCTYPE html><html><head><title>Just a moment...</title><script src="/cdn-cgi/challenge-platform/x.js">'
+    sent = []
+
+    def fake_send(self, request, **kw):
+        sent.append(request.url)
+        resp = requests.Response()
+        resp.status_code, resp._content, resp.url = 200, body, request.url
+        resp.headers["Content-Type"] = "text/html; charset=UTF-8"
+        resp.request = request
+        return resp
+
+    monkeypatch.setattr(requests.adapters.HTTPAdapter, "send", fake_send)
+    s = requests.Session()
+    ratelimit.install(led, [s], channel="oa")
+    with pytest.raises(HostLimited, match="challenge page"):
+        s.get("https://pubs.example.org/doi/pdf/10.1/x")
+    assert led.cooling("pubs.example.org")
+    with pytest.raises(HostLimited, match="cooldown"):
+        s.get("https://pubs.example.org/doi/pdf/10.1/y")
+    assert len(sent) == 1  # nothing sent while cooling down
+
+
+def test_challenge_page_ignores_article_with_recaptcha_widget():
+    article = (b"<html><head><title>Inverse problems in ODEs | Journal</title>"
+               b'<script src="https://www.google.com/recaptcha/api.js"></script></head><body>...')
+    assert not challenge_page(article)
+    assert challenge_page(b"<html><head><title>Attention Required! | Cloudflare</title>")
+    assert challenge_page(b"<html><head><TITLE>Access Denied</TITLE></head>")
+
+
+def test_200_pdf_not_inspected(tmp_path, monkeypatch):
+    monkeypatch.setattr(ratelimit.time, "sleep", lambda s: None)
+    led = _ledger(tmp_path)
+
+    def fake_send(self, request, **kw):
+        resp = requests.Response()
+        resp.status_code, resp._content, resp.url = 200, b"%PDF-1.7 ... just a moment", request.url
+        resp.headers["Content-Type"] = "application/pdf"
+        resp.request = request
+        return resp
+
+    monkeypatch.setattr(requests.adapters.HTTPAdapter, "send", fake_send)
+    s = requests.Session()
+    ratelimit.install(led, [s], channel="oa")
+    assert s.get("https://pubs.example.org/a.pdf").content.startswith(b"%PDF")
+    assert led.cooling("pubs.example.org") is None
+
+
+def test_env_overrides_read_at_construction_not_import(tmp_path, monkeypatch):
+    monkeypatch.setenv("AUTO_PAPER_GLOBAL_DAILY_OK", "7")
+    monkeypatch.setenv("AUTO_PAPER_PER_HOST_DAILY_REQUESTS", "9")
+    monkeypatch.setenv("AUTO_PAPER_LIMIT_BROWSER", "3,5,10,1")
+    led = Ledger(tmp_path / "e.sqlite")
+    assert led.global_daily_ok == 7 and led.per_host_daily_requests == 9
+    assert led.limits["browser"]["daily_ok"] == 3
+
+
+def test_cli_loads_dotenv_before_ledger(tmp_path, monkeypatch):
+    from auto_paper_download import __main__ as cli
+
+    (tmp_path / ".env").write_text("AUTO_PAPER_GLOBAL_DAILY_OK=5\nAUTO_PAPER_LIMIT_OA=2,4,1,0\n")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("AUTO_PAPER_GLOBAL_DAILY_OK", raising=False)
+    monkeypatch.delenv("AUTO_PAPER_LIMIT_OA", raising=False)
+    (tmp_path / "savedrecs.xls").write_text("")
+    seen = {}
+
+    def fake_download(**kw):
+        seen["ledger"] = kw["ledger"]
+        return iter(())
+
+    monkeypatch.setattr(cli, "download_from_savedrecs", fake_download)
+    try:
+        cli.main(["--savedrecs", str(tmp_path / "savedrecs.xls"), "--ledger", str(tmp_path / "l.sqlite"),
+                  "--output-dir", str(tmp_path / "out")])
+    except SystemExit:
+        pass
+    assert seen["ledger"].global_daily_ok == 5
+    assert seen["ledger"].limits["oa"]["daily_ok"] == 2

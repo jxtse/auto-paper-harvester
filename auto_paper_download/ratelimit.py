@@ -100,6 +100,29 @@ def block_signal_from_message(message: str) -> Optional[float]:
     return block_signal(None, message.encode("utf-8", "ignore"))
 
 
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    return int(raw) if raw else default
+
+
+# Challenge pages served with HTTP 200 (Cloudflare, Akamai, PerimeterX, ...). Matched on the
+# <title> or on challenge-script markers only, because ordinary article pages often embed a
+# reCAPTCHA widget and must not trigger a cooldown.
+_CHALLENGE_TITLE = re.compile(
+    rb"<title[^>]*>\s*(just a moment|attention required|access denied|are you a robot|"
+    rb"verify you are human|please verify|security check|human verification|captcha)",
+    re.I,
+)
+_CHALLENGE_MARKERS = (b"cf-chl", b"cf_chl_opt", b"_cf_chl", b"challenge-platform", b"px-captcha",
+                      b"/cdn-cgi/challenge")
+
+
+def challenge_page(body: bytes) -> bool:
+    """True if an HTML body (any status) is a bot-wall challenge rather than content."""
+    head = (body or b"")[:20000]
+    return bool(_CHALLENGE_TITLE.search(head)) or any(m in head.lower() for m in _CHALLENGE_MARKERS)
+
+
 def _env_limits(limits: dict[str, dict[str, float]]) -> dict[str, dict[str, float]]:
     out = {k: dict(v) for k, v in limits.items()}
     for ch in list(out):
@@ -122,10 +145,14 @@ class Ledger:
 
     path: Path
     limits: dict = field(default_factory=lambda: _env_limits(DEFAULT_LIMITS))
-    global_daily_ok: int = int(os.environ.get("AUTO_PAPER_GLOBAL_DAILY_OK", GLOBAL_DAILY_OK))
-    per_host_daily: int = int(os.environ.get("AUTO_PAPER_PER_HOST_DAILY", PER_HOST_DAILY_ATTEMPTS))
-    per_host_daily_requests: int = int(
-        os.environ.get("AUTO_PAPER_PER_HOST_DAILY_REQUESTS", PER_HOST_DAILY_REQUESTS))
+    # default_factory, not a plain default: read the environment when the Ledger is built
+    # (after .env is loaded), not when this module is imported.
+    global_daily_ok: int = field(default_factory=lambda: _env_int(
+        "AUTO_PAPER_GLOBAL_DAILY_OK", GLOBAL_DAILY_OK))
+    per_host_daily: int = field(default_factory=lambda: _env_int(
+        "AUTO_PAPER_PER_HOST_DAILY", PER_HOST_DAILY_ATTEMPTS))
+    per_host_daily_requests: int = field(default_factory=lambda: _env_int(
+        "AUTO_PAPER_PER_HOST_DAILY_REQUESTS", PER_HOST_DAILY_REQUESTS))
 
     def __post_init__(self) -> None:
         self.path = Path(self.path).expanduser()
@@ -322,16 +349,31 @@ class PacedAdapter(HTTPAdapter):
         channel = self._channel() if callable(self._channel) else self._channel
         self.ledger.pace_request(host, channel)
         response = super().send(request, **kwargs)
+        ctype = (response.headers.get("Content-Type") or "").lower()
         if response.status_code in (403, 429, 503):
-            try:
-                body = response.content[:20000]  # cached, later reads still work
-            except Exception:  # noqa: BLE001
-                body = b""
+            body = self._peek(response)
             cooldown = block_signal(response.status_code, body)
             if cooldown:
                 self.ledger.block(host, f"HTTP {response.status_code} block signal ({channel})",
                                   seconds=cooldown)
+        elif 200 <= response.status_code < 300 and "html" in ctype:
+            # Some bot walls answer 200 with a challenge page. Cool the host down and refuse
+            # the response, so no client can save the challenge HTML as a "PDF".
+            body = self._peek(response)
+            if challenge_page(body):
+                self.ledger.block(host, f"HTTP {response.status_code} challenge page ({channel})",
+                                  seconds=COOLDOWN_S)
+                response.close()
+                raise HostLimited(f"{host} served a challenge page (HTTP {response.status_code}); "
+                                  f"cooling down {COOLDOWN_S // 3600} h")
         return response
+
+    @staticmethod
+    def _peek(response) -> bytes:
+        try:
+            return response.content[:20000]  # cached on the response, later reads still work
+        except Exception:  # noqa: BLE001
+            return b""
 
 
 def install(ledger: Ledger, sessions, channel: "str | Callable[[], str]") -> None:

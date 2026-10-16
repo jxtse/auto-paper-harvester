@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Iterable
 
 from .clients import DownloadError
-from .downloader import DEFAULT_DELAY_SECONDS, download_from_savedrecs
+from .downloader import DEFAULT_DELAY_SECONDS, download_from_savedrecs, load_env_file
 from .ratelimit import Ledger
 
 LOGGER = logging.getLogger("auto_paper_download.cli")
@@ -166,6 +166,8 @@ def main(argv: list[str] | None = None) -> None:
         joined = ", ".join(missing)
         raise SystemExit(f"savedrecs input file(s) not found: {joined}")
 
+    # Load .env before building the ledger so AUTO_PAPER_LEDGER / AUTO_PAPER_LIMIT_* in it apply.
+    load_env_file()
     ledger = Ledger(args.ledger) if args.ledger else Ledger.from_env()
     downloads: list[Path] = []
     aggregate_metrics: defaultdict[str, dict[str, object]] = defaultdict(

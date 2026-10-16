@@ -32,6 +32,7 @@ from auto_paper_download.ratelimit import Ledger
 from auto_paper_download.downloader import (
     DEFAULT_DELAY_SECONDS,
     download_from_dois,
+    load_env_file,
 )
 
 
@@ -115,6 +116,8 @@ def main(argv: list[str] | None = None) -> None:
     doi = args.doi.strip()
     if not doi:
         raise SystemExit("DOI must be non-empty.")
+    load_env_file()  # before the ledger, so .env limits apply
+    ledger = Ledger(args.ledger) if args.ledger else Ledger.from_env()
 
     try:
         downloads = list(
@@ -126,7 +129,7 @@ def main(argv: list[str] | None = None) -> None:
                 dry_run=args.dry_run,
                 use_browser_fallback=args.use_browser_fallback,
                 browser_mode=args.browser_mode,
-                ledger=Ledger(args.ledger) if args.ledger else None,
+                ledger=ledger,
             )
         )
     except DownloadError as exc:

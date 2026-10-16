@@ -38,6 +38,11 @@ crashed stops counting against the success caps after one hour.
 
    A plain 403 is usually "no subscription", not a ban, and does not trigger a cooldown.
 
+   Some bot walls answer **HTTP 200** with a challenge page. An HTML response whose title or
+   scripts identify a challenge (Cloudflare "Just a moment...", Akamai "Access Denied", ...)
+   also cools the host down for 24 h, and the response is refused, so it is never saved as a
+   PDF. An ordinary article page that merely embeds a reCAPTCHA widget is not treated as one.
+
 Failure reasons tell you which limit fired:
 
 - `rate_limited: ...` — a channel or global cap. The DOI is **not** passed on to the browser
@@ -68,6 +73,9 @@ abstracts first, then download only the papers you will actually read or use. If
 more, raise a limit deliberately rather than by default.
 
 ## Overrides
+
+Set these in the environment or in the `.env` file next to where you run the tool (it is
+read before the ledger is built).
 
 | Variable | Format | Example |
 |---|---|---|
