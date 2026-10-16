@@ -200,3 +200,31 @@ def test_skill_copies_are_identical_and_install(tmp_path, capsys):
     assert packaged.startswith("---\nname: paper-download\n")
     cli.main(["skill", "--install", str(tmp_path / "skills")])
     assert (tmp_path / "skills/paper-download/SKILL.md").read_text(encoding="utf-8") == packaged
+
+
+def test_ui_moves_to_next_port_when_taken(home, monkeypatch):
+    import socket
+    busy = socket.socket()
+    busy.bind(("127.0.0.1", 0))
+    busy.listen(1)
+    port = busy.getsockname()[1]
+    seen = {}
+
+    class FakeServer:
+        def __init__(self, addr, handler):
+            if addr[1] == port:
+                raise OSError("in use")
+            seen["port"] = addr[1]
+
+        def serve_forever(self):
+            raise KeyboardInterrupt
+
+        def server_close(self):
+            pass
+
+    monkeypatch.setattr(webui, "ThreadingHTTPServer", FakeServer)
+    try:
+        webui.serve(port=port, open_browser=False, output=home)
+    finally:
+        busy.close()
+    assert seen["port"] == port + 1

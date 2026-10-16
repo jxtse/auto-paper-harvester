@@ -33,6 +33,21 @@
 
 ## 安装
 
+**没有 Python？** 在 [最新 release](https://github.com/jxtse/auto-paper-harvester/releases/latest)
+下载对应系统的文件，解压后双击 `auto-paper-harvester`，浏览器会自动打开本地页面。
+
+| 系统 | 文件 |
+|---|---|
+| macOS（Apple 芯片） | `auto-paper-harvester-macos-arm64.zip` |
+| Windows | `auto-paper-harvester-windows-x64.zip` |
+| Linux | `auto-paper-harvester-linux-x64.tar.gz` |
+
+这些文件没有做代码签名。macOS 第一次打开时会拦截，需要到 **系统设置 → 隐私与安全性**
+点 **仍要打开**；Windows 弹出 SmartScreen 时点 **更多信息 → 仍要运行**。
+Intel 芯片的 Mac 请用下面的 Python 安装方式。
+
+**有 Python**（同时得到命令行工具 `auto-paper-download`，适合脚本和 agent）：
+
 ```bash
 uv tool install git+https://github.com/jxtse/auto-paper-harvester
 # 或：pipx install git+https://github.com/jxtse/auto-paper-harvester

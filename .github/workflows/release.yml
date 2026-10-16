@@ -1,6 +1,8 @@
 name: release
 
-# Push a tag like v0.3.0 to build the wheel and attach it to a GitHub release.
+# Push a tag like v0.4.0: tests, builds the wheel and one double-click executable per OS,
+# checks each of them, and attaches everything to a GitHub release.
+# Run it by hand (workflow_dispatch) to build and check without releasing.
 on:
   push:
     tags: ["v*"]
@@ -10,7 +12,7 @@ permissions:
   contents: write
 
 jobs:
-  build:
+  wheel:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -28,10 +30,66 @@ jobs:
           uv pip install -p /tmp/w dist/*.whl
           /tmp/w/bin/auto-paper-download skill > /dev/null
           /tmp/w/bin/python -c "import importlib.resources as r; assert r.files('auto_paper_download').joinpath('ui/index.html').is_file()"
+      - uses: actions/upload-artifact@v4
+        with: { name: wheel, path: dist/* }
+
+  executable:
+    needs: wheel
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-latest,   asset: auto-paper-harvester-macos-arm64.zip }
+          - { os: windows-latest, asset: auto-paper-harvester-windows-x64.zip }
+          - { os: ubuntu-22.04,   asset: auto-paper-harvester-linux-x64.tar.gz }
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Build
+        run: packaging/build.sh
+      - name: Check the executable
+        run: |
+          exe=dist/auto-paper-harvester; [ -f "$exe.exe" ] && exe="$exe.exe"
+          home="$RUNNER_TEMP/aph"
+          AUTO_PAPER_HOME="$home" "$exe" doctor
+          "$exe" skill | head -3 | grep -q "name: paper-download"
+          AUTO_PAPER_HOME="$home" "$exe" ui --no-open --port 8799 > ui.log 2>&1 &
+          for i in $(seq 1 30); do grep -q "UI: http" ui.log && break; sleep 1; done
+          tok=$(grep -o 't=[A-Za-z0-9_-]*' ui.log | cut -c3-)
+          curl -sf "http://127.0.0.1:8799/?t=$tok" | grep -q "Auto Paper"
+          curl -sf -H "X-Token: $tok" http://127.0.0.1:8799/api/state > /dev/null
+          code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8799/api/state)
+          [ "$code" = 403 ]
+      - name: Package
+        run: |
+          mkdir -p out && cp LICENSE packaging/README-executable.txt dist/
+          cd dist
+          case "${{ matrix.asset }}" in
+            *.zip) if [ "$RUNNER_OS" = Windows ]; then
+                     7z a ../out/${{ matrix.asset }} auto-paper-harvester.exe LICENSE README-executable.txt
+                   else
+                     zip -9 ../out/${{ matrix.asset }} auto-paper-harvester LICENSE README-executable.txt
+                   fi ;;
+            *.tar.gz) tar czf ../out/${{ matrix.asset }} auto-paper-harvester LICENSE README-executable.txt ;;
+          esac
+      - uses: actions/upload-artifact@v4
+        with: { name: "${{ matrix.asset }}", path: "out/*" }
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [wheel, executable]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: assets, merge-multiple: true }
       - name: Release
-        if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --generate-notes \
-            || gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          ls -la assets
+          gh release create "$GITHUB_REF_NAME" assets/* -R "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes \
+            || gh release upload "$GITHUB_REF_NAME" assets/* -R "$GITHUB_REPOSITORY" --clobber

@@ -36,6 +36,22 @@ It only downloads what you, your API keys, or your institution can already acces
 
 ## Install
 
+**No Python?** Download the file for your system from the
+[latest release](https://github.com/jxtse/auto-paper-harvester/releases/latest), unzip, and
+double-click `auto-paper-harvester`. It opens the local page in your browser.
+
+| System | File |
+|---|---|
+| macOS (Apple silicon) | `auto-paper-harvester-macos-arm64.zip` |
+| Windows | `auto-paper-harvester-windows-x64.zip` |
+| Linux | `auto-paper-harvester-linux-x64.tar.gz` |
+
+The files are not code-signed. On first run, macOS asks you to allow it under
+**System Settings → Privacy & Security → Open Anyway**; Windows SmartScreen needs
+**More info → Run anyway**. Intel Macs: use the Python install below.
+
+**With Python** (also gives you the `auto-paper-download` command for scripts and agents):
+
 ```bash
 uv tool install git+https://github.com/jxtse/auto-paper-harvester
 # or: pipx install git+https://github.com/jxtse/auto-paper-harvester
