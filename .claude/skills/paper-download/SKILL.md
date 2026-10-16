@@ -1,132 +1,69 @@
 ---
 name: paper-download
 description: >
-  Use this skill when the user wants to download paper PDFs by DOI(s). Triggers:
-  "下载这个/这几个 DOI的 PDF/全文", "把这个 DOI 列表全部下下来", "批量下 dois.txt", "download
-  paper(s) for DOI(s) …", "bulk-download from this Web of Science / WoS savedrecs
-  export". Routes each DOI through publisher TDM APIs (Wiley/Elsevier/Springer)
-  then OA fallbacks (OpenAlex/Crossref/Unpaywall), and — when
-  --use-browser-fallback is set — a final Playwright pass that reuses
-  institutional cookies for ACS/RSC/IEEE/AIP/IOP/APS/Science. DO NOT use for paper
-  *search* (use Semantic Scholar / arXiv instead), Zotero import / metadata sync,
-  or downloading *all references of* a single paper (use the ref-downloader skill).
+  Use when the user wants full-text PDFs for papers they already identified: one or more
+  DOIs, doi.org links, or a reference list ("下载这几篇论文的 PDF", "把这个 DOI 列表下下来",
+  "download the PDFs for these references"). Tries open access first, then the publisher's
+  TDM API if the user has a key, then (opt-in) the user's own logged-in Chrome. Not for
+  finding papers, Zotero import, or bypassing paywalls.
 ---
 
-# Paper Download — Agent Runbook
+# paper-download
 
-> Slim runbook loaded when the skill is invoked. Configuration depth and
-> human-facing reference live in the project docs:
-> - **[../../../README.md](../../../README.md)** — install + invoke (humans and agents)
-> - **[../../../docs/BROWSER_FALLBACK.md](../../../docs/BROWSER_FALLBACK.md)** — every browser-fallback knob
-> - **[../../../docs/SUPPORTED_PUBLISHERS.md](../../../docs/SUPPORTED_PUBLISHERS.md)** — per-publisher routing + tier table
+Command: `auto-paper-download` (from https://github.com/jxtse/auto-paper-harvester).
 
-## Prerequisites (verify once per workspace)
-
-1. `auto_paper_download` is importable. If not: `pip install -e .` from the repo root
-   (add `[browser]` extra + `playwright install chromium` for browser fallback).
-2. A `.env` exists in the cwd the scripts will run from. Minimum: `CROSSREF_MAILTO`
-   (any real email). Missing creds don't error — they silently disable that path,
-   so surface the warning to the user verbatim if creds are empty.
-
-## Pre-flight (per invocation)
-
-1. **Echo back what you'll do**: `即将下载 N 个 DOI：<前 3 个示例>`
-2. **DOIs valid**? Each line matches `10.\d{4,9}/.+`. Malformed lines are silently dropped.
-3. **Output dir agreed**? Default `./downloads/pdfs/`. Confirm if running on user's machine.
-
-## Auto-flag rules (apply without asking)
-
-| Condition | Action |
-|---|---|
-| DOI list contains any of `10.1021` `10.1039` `10.1126` `10.1109` `10.1063` `10.1088` `10.1103` `10.1146` `10.1080` | Add `--use-browser-fallback` (these have no public TDM API) |
-| DOI file has > 100 entries | Add `--resume --batch-size 500` |
-| User didn't say "redownload" / "refresh" | Don't add `--overwrite` |
-| First `--use-browser-fallback` on this machine | Warn: "A Chromium window will open — please complete your university SSO login once; cookies are cached for next time" |
-| Always | Add `--ledger ~/.cache/auto_paper_download/ledger.sqlite` so caps and cooldowns persist across runs |
-| `PLAYWRIGHT_MCP_EXTENSION_TOKEN` is set and the list has ACS / MDPI / other bot-walled publishers | Add `--browser-mode extension` |
-
-## Commands
+## 0. Install once
 
 ```bash
-# Single DOI
-python .claude/skills/paper-download/scripts/download_by_doi.py \
-  --doi <DOI> [--use-browser-fallback] [--verbose]
-
-# Multiple DOIs (flag-repeat OR --doi-file)
-python .claude/skills/paper-download/scripts/download_multiple_dois.py \
-  --doi-file ./dois.txt [--resume] [--batch-size 500] [--use-browser-fallback]
-
-# WoS savedrecs.xls bulk
-python -m auto_paper_download \
-  --savedrecs ./savedrecs.xls [--use-browser-fallback] [--verbose]
+auto-paper-download --help >/dev/null 2>&1 || \
+  uv tool install git+https://github.com/jxtse/auto-paper-harvester   # or: pipx install git+...
+auto-paper-download doctor
 ```
 
-## Output layout
+`doctor` prints three lines, one per download step:
 
-```
-<output_dir>/                       # default: ./downloads/pdfs/
-├── <doi_slug>/
-│   ├── <doi_slug>.pdf              # main PDF
-│   └── <doi_slug>_SI_1.pdf         # supplementary PDFs when found
-├── _browser_fallback/              # PDFs recovered by the browser pass
-│   └── <doi_slug>.pdf
-└── state/                          # multi-DOI script only
-    ├── <name>.checkpoint.json
-    ├── <name>_successes.txt
-    └── <name>_failures.txt
-```
+1. **Open access** (OpenAlex / Unpaywall / Crossref). Needs an e-mail address, sent to those
+   APIs as a contact. If the line starts with `--`, ask the user which e-mail to use, then
+   write it to `~/.auto-paper-download/.env` as `OPENALEX_MAILTO=`, `UNPAYWALL_EMAIL=` and
+   `CROSSREF_MAILTO=` (one per line). Do not invent an address.
+2. **Publisher TDM APIs** (Elsevier / Wiley / Springer). Optional. Without a key that step is
+   skipped. Never ask the user to paste keys into the chat; suggest `auto-paper-download ui`,
+   which stores them locally.
+3. **Browser** (the user's own Chrome via the Playwright Extension). Optional and manual:
+   the user installs the extension, logs in to their library, and pastes the token in
+   `auto-paper-download ui`. Only use it if `doctor` shows it ready.
 
-`<doi_slug>` = lowercased DOI with `[^A-Za-z0-9._-]` replaced by `_`.
+## 1. Download
 
-## Reading the summary
-
-The CLI prints per-publisher tallies and then up to 20 residual failures:
-
-```
-Publisher PDF download summary:
-  Crossref: 12/15 PDFs succeeded (80.0%)
-  Elsevier: 28/30 PDFs succeeded (93.3%)
-  BrowserFallback: 4/5 PDFs succeeded (80.0%)
-3 DOI(s) could not be downloaded:
-  - 10.1109/TPAMI.2024.999  (auth_redirect: Bounced to SSO at 'https://sso.uni.edu/...')
+```bash
+auto-paper-download get 10.1016/j.jocs.2020.101171 10.5194/npg-20-705-2013 -o papers --json
+auto-paper-download get --file refs.txt -o papers --json          # any text with DOIs in it
+auto-paper-download get --file refs.txt -o papers --json --browser extension   # step 3 on
 ```
 
-**Report back to the user:**
-- Overall succeeded/attempted counts
-- Per-publisher numbers if mixed publishers
-- Residual failures **with their reasons** — especially `auth_redirect` ones (user
-  needs to log in once via the browser window, then rerun)
+- Tell the user first: how many DOIs, where the files go, whether step 3 is on.
+- Add `--browser extension` only if `doctor` line 3 is `OK` and the user agreed to use their
+  Chrome. It opens one tab. If a CAPTCHA does not clear by itself the paper is skipped and
+  the site cools down for 24 h. Never solve a CAPTCHA for the user.
+- Daily caps and per-site pacing are on by default (ledger at
+  `~/.auto-paper-download/ledger.sqlite`). Do not pass `--no-ledger` or raise limits
+  unless the user asks. A `rate_limited` or `host_limited` reason means "try again tomorrow".
+- Download only papers the user selected. If the list has more than ~50 DOIs, confirm first.
 
-## Common flags
+## 2. Report
 
-| Flag | Purpose |
+`--json` prints `{"requested", "pdfs", "failed": [{"doi", "reason"}], "output_dir"}`.
+Report: `<pdfs>/<requested>` saved to `<output_dir>`, then each failed DOI with its reason in
+plain words:
+
+| reason contains | tell the user |
 |---|---|
-| `--use-browser-fallback` | Enable Playwright second pass (see auto-flag rules above) |
-| `--browser-mode extension` | Run the browser pass in the user's own Chrome (Playwright Extension; needs `PLAYWRIGHT_MCP_EXTENSION_TOKEN`) |
-| `--ledger <path>` | Persistent daily caps / per-host gap / cooldowns. Use it by default |
-| `--resume` | Skip DOIs in the checkpoint (multi-DOI script) |
-| `--batch-size N` / `--batch-index I` | Process slice `[I*N, (I+1)*N)` |
-| `--delay <sec>` | Throttle between requests (≥ 1.0s enforced) |
-| `--overwrite` | Re-download even if file exists |
-| `--dry-run` | Show routing without downloading |
-| `--verbose` | Per-DOI download plan + selector debug |
-| `--output-dir <path>` | Override default `./downloads/pdfs/` |
+| `no_source` / all sources `DownloadError` | no open copy found; a TDM key or step 3 may get it |
+| `rate_limited` / `host_limited` / `cooldown` | daily limit or a site cooling down; retry later |
+| `challenge` | the site showed a bot check; it was not solved |
+| `auth_redirect` | their browser is not logged in to the library |
 
-## When something goes wrong
+Files: `<output_dir>/<doi_slug>/<doi_slug>.pdf` plus any supplementary PDFs next to it.
+Existing files are skipped on re-runs.
 
-| Symptom | Likely cause / fix |
-|---|---|
-| `ModuleNotFoundError: auto_paper_download` | `pip install -e .` not run from repo root |
-| `editable mode currently requires a setuptools-based build` | pip < 21.3; `python -m pip install --upgrade pip` |
-| Publisher reports `0/N succeeded` | Missing API credential in `.env` (surface to user) |
-| `auth_redirect` in browser fallback | User needs interactive SSO login in the Chromium window |
-| `no_link` in browser fallback | Publisher updated their layout; selector list in [docs/SUPPORTED_PUBLISHERS.md](../../../docs/SUPPORTED_PUBLISHERS.md#adding-a-new-publisher) |
-| Springer 403 on a DOI user has access to | Springer API serves OA only; rerun with `--use-browser-fallback` |
-| All ACS/RSC DOIs fail and no `--use-browser-fallback` was used | Re-invoke with the flag (no TDM API for these publishers) |
-| `challenge_timeout` / "Just a moment..." / Akamai "Access Denied" | Bot wall. Do not retry in a loop. If the user has the Playwright Extension, rerun with `--browser-mode extension`; otherwise report it |
-| `challenge` in extension mode | Page did not clear by itself; the publisher is in a 24 h cooldown. Never solve the CAPTCHA for the user; tell them |
-| `rate_limited: ...` | Daily cap or cooldown from `--ledger`. Report it; do not raise limits unless the user asks |
-
-For deeper troubleshooting of the browser fallback (channels, profile location,
-headless vs headed, all env vars), see
-[docs/BROWSER_FALLBACK.md](../../../docs/BROWSER_FALLBACK.md).
+More: `auto-paper-download get -h`, and the repo README.

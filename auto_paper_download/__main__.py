@@ -158,6 +158,7 @@ commands:
   get DOI [DOI ...]     download papers by DOI (or --file refs.txt with any text containing DOIs)
   ui                    open the local web page: set API keys, connect Chrome, download
   doctor                show which download steps are configured
+  skill [--install DIR] print the agent skill (SKILL.md) or install it for your agent
   --savedrecs FILE ...  download every DOI in a Web of Science export (original interface)
 
 Download order for every paper: open access (OpenAlex/Unpaywall/Crossref) ->
@@ -257,10 +258,29 @@ def _cmd_ui(argv: list[str]) -> None:
     serve(port=a.port, open_browser=not a.no_open, output=a.output_dir)
 
 
+def _cmd_skill(argv: list[str]) -> None:
+    p = argparse.ArgumentParser(prog="auto-paper-download skill",
+                                description="Print the agent skill, or install it into a skills folder.")
+    p.add_argument("--install", type=Path, metavar="SKILLS_DIR",
+                   help="e.g. ~/.claude/skills or ~/.codex/skills; creates SKILLS_DIR/paper-download/SKILL.md")
+    a = p.parse_args(argv)
+    from importlib import resources
+
+    text = resources.files("auto_paper_download").joinpath("skill/SKILL.md").read_text(encoding="utf-8")
+    if not a.install:
+        print(text, end="")
+        return
+    dest = a.install.expanduser() / "paper-download" / "SKILL.md"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(text, encoding="utf-8")
+    print(f"installed {dest}")
+
+
 def main(argv: list[str] | None = None) -> None:
     argv = list(sys.argv[1:] if argv is None else argv)
-    if argv and argv[0] in ("get", "ui", "doctor"):
-        {"get": _cmd_get, "ui": _cmd_ui, "doctor": _cmd_doctor}[argv[0]](argv[1:])
+    commands = {"get": _cmd_get, "ui": _cmd_ui, "doctor": _cmd_doctor, "skill": _cmd_skill}
+    if argv and argv[0] in commands:
+        commands[argv[0]](argv[1:])
         return
     if not argv or argv[0] in ("-h", "--help", "help"):
         if not argv or argv[0] == "help" or not Path("savedrecs.xls").exists():

@@ -1,7 +1,7 @@
 [project]
 name = "auto-paper-download"
-version = "0.2.0"
-description = "Automated PDF downloader for DOIs exported from Web of Science."
+version = "0.3.0"
+description = "Download full-text PDFs by DOI: open access first, then publisher TDM APIs, then your own logged-in browser. CLI, local web UI and agent skill."
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
@@ -9,8 +9,21 @@ dependencies = [
   "beautifulsoup4>=4.12",
 ]
 authors = [
-  { name = "Auto Paper Download" },
+  { name = "Jinxiang Xie" },
 ]
+keywords = ["doi", "pdf", "open-access", "unpaywall", "openalex", "crossref", "text-and-data-mining",
+            "literature", "research-tools", "agent-skill"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Intended Audience :: Science/Research",
+  "Topic :: Scientific/Engineering",
+  "Environment :: Console",
+  "Environment :: Web Environment",
+]
+
+[project.urls]
+Homepage = "https://github.com/jxtse/auto-paper-harvester"
+Issues = "https://github.com/jxtse/auto-paper-harvester/issues"
 
 [project.optional-dependencies]
 # Playwright-driven browser fallback for paywalled publishers without a TDM API
@@ -34,4 +47,4 @@ build-backend = "setuptools.build_meta"
 packages = ["auto_paper_download"]
 
 [tool.setuptools.package-data]
-auto_paper_download = ["ui/*.html"]
+auto_paper_download = ["ui/*.html", "skill/SKILL.md"]

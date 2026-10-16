@@ -159,3 +159,12 @@ def test_ui_download_job_runs(server, monkeypatch):
             break
     assert view["state"] == "done" and view["saved"][0].endswith("10.5194_x.pdf")
     assert call(port, "/api/download", {"text": "nothing"}, token=app.token)[0] == 400
+
+
+def test_skill_copies_are_identical_and_install(tmp_path, capsys):
+    root = Path(__file__).resolve().parents[1]
+    packaged = (root / "auto_paper_download/skill/SKILL.md").read_text()
+    assert (root / ".claude/skills/paper-download/SKILL.md").read_text() == packaged
+    assert packaged.startswith("---\nname: paper-download\n")
+    cli.main(["skill", "--install", str(tmp_path / "skills")])
+    assert (tmp_path / "skills/paper-download/SKILL.md").read_text() == packaged
