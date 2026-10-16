@@ -24,5 +24,8 @@ _debug
 settings.json
 
 /downloads
-/.venv/dist
+/.venv
+/.build-venv
+/dist
 /build
+!packaging/README-executable.txt

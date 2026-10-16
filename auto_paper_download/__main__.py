@@ -276,7 +276,18 @@ def _cmd_skill(argv: list[str]) -> None:
     print(f"installed {dest}")
 
 
+def _utf8_console() -> None:
+    # Windows consoles default to a legacy code page (cp1252, cp936...) and raise
+    # UnicodeEncodeError on characters outside it (titles, the skill text, non-ASCII paths).
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
+
 def main(argv: list[str] | None = None) -> None:
+    _utf8_console()
     argv = list(sys.argv[1:] if argv is None else argv)
     commands = {"get": _cmd_get, "ui": _cmd_ui, "doctor": _cmd_doctor, "skill": _cmd_skill}
     if argv and argv[0] in commands:

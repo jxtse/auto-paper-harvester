@@ -310,7 +310,16 @@ def serve(*, port: int = 8765, open_browser: bool = True, ledger: Optional[Path]
     load_env_file(ENV_FILE)
     ledger = Path(ledger or os.environ.get("AUTO_PAPER_LEDGER") or DEFAULT_LEDGER).expanduser()
     app = App(ledger, Path(output or DEFAULT_OUTPUT).expanduser())
-    httpd = ThreadingHTTPServer(("127.0.0.1", port), make_handler(app, port))
+    httpd = None
+    for candidate in range(port, port + 20):  # another copy may already hold the port
+        try:
+            httpd = ThreadingHTTPServer(("127.0.0.1", candidate), make_handler(app, candidate))
+            port = candidate
+            break
+        except OSError:
+            continue
+    if httpd is None:
+        raise SystemExit(f"ports {port}-{port + 19} are all in use; pass --port")
     url = f"http://127.0.0.1:{port}/?t={app.token}"
     print(f"auto-paper-download UI: {url}\n(settings: {ENV_FILE}; Ctrl+C to stop)", flush=True)
     if open_browser:
