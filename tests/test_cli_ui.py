@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import urllib.error
 import urllib.request
@@ -89,14 +90,15 @@ def test_doctor_reports_steps(home, monkeypatch, capsys):
 
 def test_settings_file_is_private_and_secrets_not_echoed(home, monkeypatch):
     webui.write_env_file({"ELSEVIER_API_KEY": "sekret", "OPENALEX_MAILTO": "a@b.c", "EVIL": "x"})
-    text = webui.ENV_FILE.read_text()
+    text = webui.ENV_FILE.read_text(encoding="utf-8")
     assert "ELSEVIER_API_KEY=sekret" in text and "EVIL" not in text
-    assert (webui.ENV_FILE.stat().st_mode & 0o777) == 0o600
+    if os.name == "posix":  # Windows has no Unix permission bits
+        assert (webui.ENV_FILE.stat().st_mode & 0o777) == 0o600
     view = webui.settings_view()
     assert view["ELSEVIER_API_KEY"] == {"set": True, "value": "", "secret": True}
     assert view["OPENALEX_MAILTO"]["value"] == "a@b.c"
     webui.write_env_file({"ELSEVIER_API_KEY": ""})  # empty value removes the key
-    assert "ELSEVIER_API_KEY" not in webui.ENV_FILE.read_text()
+    assert "ELSEVIER_API_KEY" not in webui.ENV_FILE.read_text(encoding="utf-8")
 
 
 @pytest.fixture
@@ -163,8 +165,8 @@ def test_ui_download_job_runs(server, monkeypatch):
 
 def test_skill_copies_are_identical_and_install(tmp_path, capsys):
     root = Path(__file__).resolve().parents[1]
-    packaged = (root / "auto_paper_download/skill/SKILL.md").read_text()
-    assert (root / ".claude/skills/paper-download/SKILL.md").read_text() == packaged
+    packaged = (root / "auto_paper_download/skill/SKILL.md").read_text(encoding="utf-8")
+    assert (root / ".claude/skills/paper-download/SKILL.md").read_text(encoding="utf-8") == packaged
     assert packaged.startswith("---\nname: paper-download\n")
     cli.main(["skill", "--install", str(tmp_path / "skills")])
-    assert (tmp_path / "skills/paper-download/SKILL.md").read_text() == packaged
+    assert (tmp_path / "skills/paper-download/SKILL.md").read_text(encoding="utf-8") == packaged
