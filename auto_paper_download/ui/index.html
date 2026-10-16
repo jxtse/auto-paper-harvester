@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Auto Paper Harvester</title>
+<style>
+:root{--bg:#f7f7f5;--card:#fff;--ink:#1d1d1f;--mute:#6b6b70;--line:#e3e3e0;--ok:#1f7a4d;--warn:#a15c00;--bad:#b42318;--acc:#2f5bd3}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+header{display:flex;align-items:center;justify-content:space-between;padding:18px 28px;border-bottom:1px solid var(--line);background:var(--card)}
+header h1{font-size:17px;margin:0}header small{color:var(--mute);margin-left:8px}
+main{max-width:1080px;margin:0 auto;padding:22px 28px;display:grid;grid-template-columns:1fr 1fr;gap:18px;align-items:start}
+a{color:var(--acc);text-decoration:none}a:hover{text-decoration:underline}
+code{font-family:ui-monospace,Menlo,monospace;font-size:12px;background:#f2f2f0;padding:1px 5px;border-radius:4px;overflow-wrap:anywhere}
+.why{display:block;color:var(--mute);font-size:12px;margin-top:4px;overflow-wrap:anywhere}
+section{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:18px 20px}
+section.wide{grid-column:1/-1}h2{font-size:15px;margin:0 0 4px}p.hint{color:var(--mute);margin:0 0 12px;font-size:13px}
+label{display:block;font-size:12px;color:var(--mute);margin:10px 0 3px}
+input,textarea,select{width:100%;height:36px;padding:7px 9px;border:1px solid var(--line);border-radius:6px;font:inherit;background:#fff}
+textarea{height:auto;min-height:150px;font-family:ui-monospace,Menlo,monospace;font-size:12.5px}
+button{height:36px;padding:0 14px;border-radius:6px;border:1px solid var(--acc);background:var(--acc);color:#fff;font:inherit;cursor:pointer}
+button.ghost{background:#fff;color:var(--acc)}button:disabled{opacity:.5;cursor:default}
+.row{display:flex;gap:10px;align-items:center;margin-top:12px;flex-wrap:wrap}
+.steps{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+.step{border:1px solid var(--line);border-radius:8px;padding:10px 12px}.step b{display:block;font-size:13px}
+.pill{display:inline-block;font-size:12px;padding:1px 8px;border-radius:99px;margin-top:4px}
+.on{background:#e6f4ec;color:var(--ok)}.off{background:#f2f2f0;color:var(--mute)}.warn{background:#fdf1e1;color:var(--warn)}
+.set{font-size:12px;margin-left:6px}.set.y{color:var(--ok)}.set.n{color:var(--mute)}
+textarea::placeholder,input::placeholder{color:#b5b5b8}
+ol{padding-left:18px;margin:6px 0}li{margin:3px 0}
+pre{overflow-wrap:anywhere;background:#111;color:#ddd;border-radius:8px;padding:10px 12px;max-height:260px;overflow:auto;font-size:12px;margin:10px 0 0;white-space:pre-wrap}
+table{width:100%;border-collapse:collapse;font-size:12.5px}td,th{text-align:left;padding:4px 6px;border-bottom:1px solid var(--line)}
+.bar{height:6px;background:#eee;border-radius:3px;overflow:hidden;margin-top:8px}.bar>i{display:block;height:100%;background:var(--acc);width:0}
+.msg{font-size:13px}.msg.bad{color:var(--bad)}.msg.ok{color:var(--ok)}
+@media(max-width:820px){main{grid-template-columns:1fr}.steps{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<header><div><h1>Auto Paper Harvester<small data-i18n="tag"></small></h1></div>
+<button class="ghost" id="lang">English</button></header>
+<main>
+<section class="wide"><h2 data-i18n="order"></h2><p class="hint" data-i18n="orderHint"></p>
+<div class="steps">
+<div class="step"><b data-i18n="s1"></b><span id="s1"></span></div>
+<div class="step"><b data-i18n="s2"></b><span id="s2"></span></div>
+<div class="step"><b data-i18n="s3"></b><span id="s3"></span></div></div></section>
+
+<section><h2 data-i18n="keys"></h2><p class="hint" data-i18n="keysHint"></p>
+<label>Email (OpenAlex / Unpaywall / Crossref)</label><input id="email" placeholder="you@university.edu">
+<label>ELSEVIER_API_KEY <a href="https://dev.elsevier.com/apikey/manage" target="_blank" rel="noreferrer" data-i18n="get"></a><span class="set" id="ELSEVIER_API_KEY_set"></span></label><input id="ELSEVIER_API_KEY" type="password" autocomplete="off">
+<label>WILEY_TDM_TOKEN <a href="https://onlinelibrary.wiley.com/library-info/resources/text-and-datamining" target="_blank" rel="noreferrer" data-i18n="get"></a><span class="set" id="WILEY_TDM_TOKEN_set"></span></label><input id="WILEY_TDM_TOKEN" type="password" autocomplete="off">
+<label>SPRINGER_API_KEY <a href="https://dev.springernature.com/" target="_blank" rel="noreferrer" data-i18n="get"></a><span class="set" id="SPRINGER_API_KEY_set"></span></label><input id="SPRINGER_API_KEY" type="password" autocomplete="off">
+<div class="row"><button id="save" data-i18n="save"></button><span class="msg" id="saveMsg"></span></div>
+<p class="hint" style="margin-top:10px"><span data-i18n="savedTo"></span> <code id="envFile"></code></p></section>
+
+<section><h2 data-i18n="browser"></h2><p class="hint" data-i18n="browserHint"></p>
+<ol><li><span data-i18n="b1"></span> <a id="extLink" target="_blank" rel="noreferrer" data-i18n="store"></a></li>
+<li data-i18n="b2"></li><li data-i18n="b3"></li><li><span data-i18n="b4"></span> <code>npm i -g @playwright/cli</code></li></ol>
+<label>PLAYWRIGHT_MCP_EXTENSION_TOKEN<span class="set" id="PLAYWRIGHT_MCP_EXTENSION_TOKEN_set"></span></label><input id="PLAYWRIGHT_MCP_EXTENSION_TOKEN" type="password" autocomplete="off">
+<p class="why" id="brWhy"></p><div class="row"><button id="saveTok" data-i18n="save"></button><button id="testBr" class="ghost" data-i18n="test"></button><span class="msg" id="brMsg"></span></div></section>
+
+<section class="wide"><h2 data-i18n="dl"></h2><p class="hint" data-i18n="dlHint"></p>
+<textarea id="dois" placeholder="10.1016/j.jocs.2020.101171&#10;https://doi.org/10.5194/npg-20-705-2013"></textarea>
+<div class="row" style="align-items:flex-end">
+<div style="flex:2;min-width:220px"><label data-i18n="out"></label><input id="out"></div>
+<div style="flex:1;min-width:180px"><label data-i18n="mode"></label><select id="mode">
+<option value="" data-i18n="m0"></option><option value="extension" data-i18n="m1"></option><option value="playwright" data-i18n="m2"></option></select></div>
+<button id="go" data-i18n="start"></button><button id="stop" class="ghost" data-i18n="stop" disabled></button></div>
+<div class="bar" id="barWrap" hidden><i id="bar"></i></div><div class="msg" id="jobMsg" style="margin-top:6px"></div>
+<pre id="log" hidden></pre></section>
+
+<section class="wide"><h2 data-i18n="limits"></h2><p class="hint" data-i18n="limitsHint"></p><div id="usage"></div></section>
+</main>
+<script>
+const T={zh:{tag:"按 DOI 批量下载论文全文",order:"下载顺序",orderHint:"每篇论文依次尝试，前一步拿到 PDF 就停。",s1:"① 开放获取 OpenAlex / Unpaywall / Crossref",s2:"② 出版社 TDM API（有 key 才走）",s3:"③ 你的浏览器（可选，用你已登录的机构身份）",keys:"API Key",keysHint:"邮箱用于开放获取接口的礼貌访问，必填。三个出版社 key 都是可选的，没有就跳过第 ② 步。",get:"申请",save:"保存",savedTo:"保存在本机：",browser:"浏览器（第 ③ 步，可选）",browserHint:"用你自己的 Chrome 和机构登录状态下载付费论文。只开一个标签页，遇到验证码会停下，不会替你点。",b1:"安装 Playwright Extension：",store:"Chrome 应用商店",b2:"在 Chrome 里登录学校图书馆或出版社",b3:"点击扩展图标，复制显示的 token，粘贴到下面",b4:"安装 playwright-cli：",test:"测试连接",dl:"下载",dlHint:"粘贴 DOI、DOI 链接或含 DOI 的任意文本（例如参考文献列表），一次最多 500 个。",out:"保存到",mode:"下载不到时用浏览器重试",m0:"不用浏览器",m1:"我的 Chrome（扩展）",m2:"独立 Chromium（Playwright）",start:"开始下载",stop:"停止",limits:"今日额度",limitsHint:"每日上限和每个网站的请求间隔保护你的 IP 不被封。被拦截的网站会自动冷却 24 小时。",ch:"渠道",ok:"成功",att:"尝试",cool:"冷却中",none:"今天还没有下载记录。",on:"已配置",off:"未配置，跳过此步",chan:{oa:"① 开放获取",elsevier:"② Elsevier TDM",wiley:"② Wiley TDM",springer:"② Springer API",inst:"机构代理（高级）",browser:"③ 浏览器"},saved:"已保存",needMail:"填写邮箱后启用",notSet:"未填写",keep:"已保存，留空则保持不变",running:"下载中",done:"完成",cancelled:"已停止",error:"出错",of:"/",got:"已下载",fail:"未下载",ready:"可用",notReady:"未就绪"},
+en:{tag:"Bulk full-text download by DOI",order:"Download order",orderHint:"Each paper goes through these steps and stops at the first PDF.",s1:"① Open access: OpenAlex / Unpaywall / Crossref",s2:"② Publisher TDM API (only with a key)",s3:"③ Your browser (optional, your institutional login)",keys:"API keys",keysHint:"The e-mail is required for polite use of the open-access APIs. Publisher keys are optional; without one, step ② is skipped.",get:"get one",save:"Save",savedTo:"Stored locally in",browser:"Browser (step ③, optional)",browserHint:"Download paywalled papers with your own Chrome and institutional login. One tab only; it stops at a CAPTCHA and never solves it for you.",b1:"Install the Playwright Extension:",store:"Chrome Web Store",b2:"Log in to your library or the publisher in Chrome",b3:"Click the extension icon, copy the token and paste it below",b4:"Install playwright-cli:",test:"Test connection",dl:"Download",dlHint:"Paste DOIs, DOI links or any text that contains DOIs (a reference list works). Up to 500 per run.",out:"Save to",mode:"Retry failures in a browser",m0:"No browser",m1:"My Chrome (extension)",m2:"Separate Chromium (Playwright)",start:"Start",stop:"Stop",limits:"Today's limits",limitsHint:"Daily caps and per-site spacing keep your IP from being blocked. A site that blocks us cools down for 24 h.",ch:"Channel",ok:"OK",att:"Attempts",cool:"Cooling down",none:"No downloads today yet.",on:"configured",off:"not configured, skipped",chan:{oa:"① Open access",elsevier:"② Elsevier TDM",wiley:"② Wiley TDM",springer:"② Springer API",inst:"Institutional proxy (advanced)",browser:"③ Browser"},saved:"Saved",needMail:"add an e-mail to enable",notSet:"not set",keep:"saved; leave blank to keep",running:"Running",done:"Done",cancelled:"Stopped",error:"Error",of:"/",got:"downloaded",fail:"not downloaded",ready:"ready",notReady:"not ready"}};
+const tok=new URLSearchParams(location.search).get("t");let L=localStorage.lang||(navigator.language.startsWith("zh")?"zh":"en"),S=null,job=null,timer=null;
+const $=id=>document.getElementById(id),t=k=>T[L][k]||k;
+const api=(p,b)=>fetch(p,{method:b?"POST":"GET",headers:{"X-Token":tok,"Content-Type":"application/json"},body:b?JSON.stringify(b):undefined}).then(r=>r.json());
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+function i18n(){document.documentElement.lang=L;$("lang").textContent=L=="zh"?"English":"中文";document.querySelectorAll("[data-i18n]").forEach(e=>e.textContent=t(e.dataset.i18n));if(S)render()}
+function pill(on,txt){return `<span class="pill ${on?"on":"off"}">${esc(txt)}</span>`}
+function render(){const st=S.steps,s=S.settings;
+$("s1").innerHTML=st.oa.length?pill(1,t("on")+": "+st.oa.join(", ")):`<span class="pill warn">${esc(t("needMail"))}</span>`;
+$("s2").innerHTML=pill(st.tdm.length,st.tdm.length?t("on")+": "+st.tdm.join(", "):t("off"));
+$("s3").innerHTML=st.browser.ready?pill(1,t("ready")):pill(0,t("notReady"))+`<span class="why">${esc(st.browser.why)}</span>`;
+$("extLink").href=st.extension_url;$("brWhy").textContent=st.browser.ready?"":st.browser.why;$("envFile").textContent=S.env_file;
+if(!$("email").value)$("email").value=s.OPENALEX_MAILTO.value||s.UNPAYWALL_EMAIL.value||s.CROSSREF_MAILTO.value||"";
+for(const k of["ELSEVIER_API_KEY","WILEY_TDM_TOKEN","SPRINGER_API_KEY","PLAYWRIGHT_MCP_EXTENSION_TOKEN"]){const on=s[k].set;$(k+"_set").textContent=on?"✓ "+t("on"):t("notSet");$(k+"_set").className="set "+(on?"y":"n");$(k).placeholder=on?t("keep"):""}
+if(!$("out").value)$("out").value=S.output;
+const u=S.ledger.usage;if(!u){$("usage").innerHTML=`<p class="hint">${t("none")}</p>`}else{
+let h=`<table><tr><th>${t("ch")}</th><th>${t("ok")}</th><th>${t("att")}</th></tr>`;
+for(const[c,v]of Object.entries(u))if(!c.startsWith("_"))h+=`<tr><td>${esc((T[L].chan||{})[c]||c)}</td><td>${v.ok} / ${v.cap_ok}</td><td>${v.attempts} / ${v.cap_attempts}</td></tr>`;
+h+="</table>";if(u._cooldown.length)h+=`<p class="hint" style="margin-top:10px"><b>${t("cool")}</b>: `+u._cooldown.map(c=>esc(c.host)+" → "+esc(c.until)).join("; ")+"</p>";$("usage").innerHTML=h}
+if(S.job)showJob(S.job)}
+function showJob(j){job=j;$("barWrap").hidden=false;const n=j.saved.filter(p=>p.endsWith(".pdf")).length;
+$("bar").style.width=(j.total?Math.min(100,100*(n+j.failed.length)/j.total):0)+"%";
+$("jobMsg").className="msg "+(j.state=="error"?"bad":j.state=="done"?"ok":"");
+$("jobMsg").textContent=`${t(j.state)} · ${t("got")} ${n} ${t("of")} ${j.total}`+(j.failed.length?` · ${t("fail")} ${j.failed.length}`:"")+` · ${j.output}`;
+$("log").hidden=false;$("log").textContent=j.log.join("\n")+(j.state!="running"&&j.failed.length?"\n\n"+j.failed.map(f=>`✗ ${f.doi}  ${f.reason}`).join("\n"):"");$("log").scrollTop=1e9;
+$("go").disabled=j.state=="running";$("stop").disabled=j.state!="running";
+if(j.state=="running"&&!timer)timer=setInterval(poll,2000);if(j.state!="running"&&timer){clearInterval(timer);timer=null;load()}}
+async function poll(){if(job)showJob(await api("/api/job/"+job.id))}
+async function load(){S=await api("/api/state");render()}
+async function save(keys){const e=$("email").value.trim(),b={};
+for(const k of keys){const v=$(k).value.trim();if(v)b[k]=v}
+if(keys.includes("email")){b.OPENALEX_MAILTO=e;b.UNPAYWALL_EMAIL=e;b.CROSSREF_MAILTO=e}
+const r=await api("/api/settings",b);for(const k of keys)if(k!="email")$(k).value="";
+S.settings=r.settings;S.steps=r.steps;render();return r}
+$("save").onclick=async()=>{await save(["email","ELSEVIER_API_KEY","WILEY_TDM_TOKEN","SPRINGER_API_KEY"]);$("saveMsg").className="msg ok";$("saveMsg").textContent=t("saved");setTimeout(()=>$("saveMsg").textContent="",2500)};
+$("saveTok").onclick=async()=>{await save(["PLAYWRIGHT_MCP_EXTENSION_TOKEN"]);$("brMsg").className="msg ok";$("brMsg").textContent=t("saved");setTimeout(()=>$("brMsg").textContent="",2500)};
+$("testBr").onclick=async()=>{$("brMsg").className="msg";$("brMsg").textContent="…";const r=await api("/api/browser/test",{});$("brMsg").className="msg "+(r.ok?"ok":"bad");$("brMsg").textContent=r.ok?t("ready"):r.why};
+$("go").onclick=async()=>{const r=await api("/api/download",{text:$("dois").value,output:$("out").value,browser:$("mode").value});
+if(r.error){$("jobMsg").className="msg bad";$("jobMsg").textContent=r.error;return}showJob(r)};
+$("stop").onclick=()=>job&&api(`/api/job/${job.id}/cancel`,{});
+$("lang").onclick=()=>{L=L=="zh"?"en":"zh";localStorage.lang=L;i18n()};
+i18n();load();
+</script>
+</body>
+</html>

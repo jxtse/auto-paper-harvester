@@ -5,7 +5,10 @@ Command line interface for the auto-paper-download package.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
+import os
+import sys
 from collections import defaultdict
 from pathlib import Path
 from typing import Iterable
@@ -148,7 +151,123 @@ def _log_publisher_summary(metrics: dict[str, dict[str, int]]) -> None:
                         len(residual) - 20)
 
 
+SUBCOMMANDS_HELP = """\
+usage: auto-paper-download <command> [options]
+
+commands:
+  get DOI [DOI ...]     download papers by DOI (or --file refs.txt with any text containing DOIs)
+  ui                    open the local web page: set API keys, connect Chrome, download
+  doctor                show which download steps are configured
+  --savedrecs FILE ...  download every DOI in a Web of Science export (original interface)
+
+Download order for every paper: open access (OpenAlex/Unpaywall/Crossref) ->
+publisher TDM API (Elsevier/Wiley/Springer, if a key is set) -> your browser (opt-in).
+Run `auto-paper-download <command> -h` for options.
+"""
+
+
+def _settings_home_env() -> None:
+    # Keys saved by the web UI apply to every command; a ./.env still wins over them.
+    load_env_file()
+    from .webui import ENV_FILE
+
+    load_env_file(ENV_FILE)
+
+
+def _cmd_get(argv: list[str]) -> None:
+    from .downloader import download_from_dois, extract_dois_from_text, unresolved_dois
+
+    p = argparse.ArgumentParser(prog="auto-paper-download get",
+                                description="Download papers by DOI.")
+    p.add_argument("dois", nargs="*", help="DOIs or doi.org links")
+    p.add_argument("--file", type=Path, help="text file containing DOIs (any format)")
+    p.add_argument("-o", "--output-dir", type=Path, default=Path("papers"))
+    p.add_argument("--browser", choices=("extension", "playwright"),
+                   help="step 3: retry failures in your Chrome ('extension') or a separate Chromium")
+    p.add_argument("--ledger", type=Path, help="rate-limit ledger (default ~/.auto-paper-download/ledger.sqlite)")
+    p.add_argument("--no-ledger", action="store_true", help="disable daily caps and pacing (not recommended)")
+    p.add_argument("--overwrite", action="store_true")
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--json", action="store_true", help="print a JSON summary (for agents and scripts)")
+    p.add_argument("-v", "--verbose", action="store_true")
+    a = p.parse_args(argv)
+    logging.basicConfig(level=logging.DEBUG if a.verbose else logging.INFO,
+                        format="%(asctime)s | %(levelname)s | %(message)s")
+    text = " ".join(a.dois) + ("\n" + a.file.read_text(encoding="utf-8") if a.file else "")
+    dois = extract_dois_from_text(text)
+    if not dois:
+        raise SystemExit("No DOI found. Pass DOIs as arguments or use --file.")
+    _settings_home_env()
+    from .webui import DEFAULT_LEDGER
+
+    ledger = None if a.no_ledger else Ledger(
+        a.ledger or Path(os.environ.get("AUTO_PAPER_LEDGER") or DEFAULT_LEDGER))
+    stream = download_from_dois(dois=dois, output_dir=a.output_dir, overwrite=a.overwrite,
+                                dry_run=a.dry_run, load_env=False,
+                                use_browser_fallback=bool(a.browser),
+                                browser_mode=a.browser or "playwright", ledger=ledger)
+    saved = [str(x) for x in stream]
+    metrics = getattr(stream, "metrics", {}) or {}
+    failed = unresolved_dois(metrics)
+    pdfs = [x for x in saved if x.endswith(".pdf")]
+    if a.json:
+        print(json.dumps({"requested": len(dois), "pdfs": pdfs, "other_files": len(saved) - len(pdfs),
+                          "failed": failed, "output_dir": str(a.output_dir)}, indent=2))
+    else:
+        print(f"\n{len(pdfs)}/{len(dois)} PDFs in {a.output_dir}")
+        for e in failed:
+            print(f"  not downloaded: {e['doi']}  ({str(e.get('reason', ''))[:160]})")
+
+
+def _cmd_doctor(argv: list[str]) -> None:
+    argparse.ArgumentParser(prog="auto-paper-download doctor").parse_args(argv)
+    _settings_home_env()
+    from .webui import DEFAULT_LEDGER, ENV_FILE, steps_view
+
+    st = steps_view()
+    mark = lambda ok: "OK  " if ok else "--  "  # noqa: E731
+    print(f"settings file: {ENV_FILE} ({'found' if ENV_FILE.exists() else 'not created yet'})")
+    print(mark(st["oa"]) + "1. open access: " + (", ".join(st["oa"]) or
+          "set OPENALEX_MAILTO / UNPAYWALL_EMAIL / CROSSREF_MAILTO to any e-mail you read"))
+    print(mark(st["tdm"]) + "2. publisher TDM APIs: " + (", ".join(st["tdm"]) or
+          "none (optional: ELSEVIER_API_KEY / WILEY_TDM_TOKEN / SPRINGER_API_KEY)"))
+    b = st["browser"]
+    print(mark(b["ready"]) + "3. your Chrome via Playwright Extension: " + ("ready" if b["ready"] else b["why"]))
+    try:
+        import playwright  # noqa: F401
+        print("OK  3b. separate Chromium (playwright) installed")
+    except ImportError:
+        print("--  3b. separate Chromium: pip install 'auto-paper-download[browser]' && playwright install chromium")
+    ledger = Path(os.environ.get("AUTO_PAPER_LEDGER") or DEFAULT_LEDGER).expanduser()
+    if ledger.exists():
+        u = Ledger(ledger).usage()
+        print(f"today: {u['_global_ok']} PDFs saved; cooling down: "
+              + (", ".join(c["host"] for c in u["_cooldown"]) or "none"))
+
+
+def _cmd_ui(argv: list[str]) -> None:
+    p = argparse.ArgumentParser(prog="auto-paper-download ui")
+    p.add_argument("--port", type=int, default=8765)
+    p.add_argument("--no-open", action="store_true", help="do not open a browser tab")
+    p.add_argument("-o", "--output-dir", type=Path, help="default download folder")
+    a = p.parse_args(argv)
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+    from .webui import serve
+
+    serve(port=a.port, open_browser=not a.no_open, output=a.output_dir)
+
+
 def main(argv: list[str] | None = None) -> None:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] in ("get", "ui", "doctor"):
+        {"get": _cmd_get, "ui": _cmd_ui, "doctor": _cmd_doctor}[argv[0]](argv[1:])
+        return
+    if not argv or argv[0] in ("-h", "--help", "help"):
+        if not argv or argv[0] == "help" or not Path("savedrecs.xls").exists():
+            print(SUBCOMMANDS_HELP)
+            if argv and argv[0] in ("-h", "--help"):
+                build_parser().print_help()
+            return
     parser = build_parser()
     args = parser.parse_args(argv)
 

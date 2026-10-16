@@ -66,6 +66,35 @@ def load_env_file(path: Path | str = ".env") -> bool:
     return True
 
 
+BROWSER_BUCKETS = ("BrowserFallback", "RealBrowser")
+
+
+def unresolved_dois(metrics: dict) -> list[dict]:
+    """DOIs that no step delivered, with the last reason, from a stream's ``metrics``.
+
+    HTTP buckets list every paper the HTTP steps missed; when a browser pass ran, its
+    bucket is the final word for the papers it tried.
+    """
+    last: dict[str, dict] = {}
+    for name, bucket in metrics.items():
+        if name in BROWSER_BUCKETS:
+            continue
+        for e in bucket.get("failed_dois", []) or []:
+            last[e.get("doi", "?")] = e
+    for name in BROWSER_BUCKETS:
+        bucket = metrics.get(name)
+        if not bucket:
+            continue
+        failed_here = {e.get("doi"): e for e in bucket.get("failed_dois", []) or []}
+        for doi in list(last):
+            if doi in failed_here:
+                last[doi] = failed_here[doi]
+            elif bucket.get("attempted"):
+                # tried in the browser and not reported as failed: recovered
+                last.pop(doi, None)
+    return list(last.values())
+
+
 def extract_dois(savedrecs_path: Path) -> list[str]:
     """
     Parse a Web of Science ``savedrecs.xls`` export and return a de-duplicated DOI list.
@@ -141,6 +170,14 @@ def extract_dois_from_text(text: str) -> list[str]:
     for match in DOI_PATTERN.finditer(text):
         candidate = match.group(0).strip()
         while candidate and ord(candidate[-1]) < 32:
+            candidate = candidate[:-1]
+        # Text from reference lists ends DOIs with punctuation or a closing bracket that
+        # is not part of the DOI ("... doi:10.1002/x.1." or "(10.1002/x.1)").
+        while candidate and candidate[-1] in ".,;:'\"" or (
+            candidate and candidate[-1] in ")]}>" and
+            candidate.count({")": "(", "]": "[", "}": "{", ">": "<"}[candidate[-1]])
+            < candidate.count(candidate[-1])
+        ):
             candidate = candidate[:-1]
         if not candidate or candidate in seen:
             continue
