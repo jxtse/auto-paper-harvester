@@ -34,9 +34,11 @@ for _candidate in [_HERE.parent, *_HERE.parents]:
         break
 
 from auto_paper_download.clients import DownloadError
+from auto_paper_download.ratelimit import Ledger
 from auto_paper_download.downloader import (
     DEFAULT_DELAY_SECONDS,
     download_from_dois,
+    load_env_file,
 )
 
 
@@ -128,6 +130,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="Zero-based batch index when using --batch-size.",
     )
     parser.add_argument(
+        "--browser-mode",
+        choices=("playwright", "extension"),
+        default="playwright",
+        help=(
+            "Browser used by --use-browser-fallback. 'playwright' launches its own Chromium "
+            "profile; 'extension' drives your running Chrome through the Playwright Extension "
+            "(needs playwright-cli and PLAYWRIGHT_MCP_EXTENSION_TOKEN). See docs/BROWSER_FALLBACK.md."
+        ),
+    )
+    parser.add_argument(
+        "--ledger",
+        type=Path,
+        help=(
+            "SQLite file for persistent daily caps, per-host pacing and block cooldowns "
+            "(also AUTO_PAPER_LEDGER). Recommended for any repeated use. See docs/RATE_LIMITS.md."
+        ),
+    )
+    parser.add_argument(
         "--verbose",
         action="store_true",
         help="Enable debug logging.",
@@ -143,6 +163,8 @@ def main(argv: list[str] | None = None) -> None:
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     )
+    load_env_file()  # before the ledger, so .env limits apply
+    ledger = Ledger(args.ledger) if args.ledger else Ledger.from_env()
 
     raw_dois: list[str] = []
     if args.doi:
@@ -213,6 +235,8 @@ def main(argv: list[str] | None = None) -> None:
                     overwrite=args.overwrite,
                     dry_run=True,
                     use_browser_fallback=args.use_browser_fallback,
+                    browser_mode=args.browser_mode,
+                    ledger=ledger,
                 )
             )
         except DownloadError as exc:
@@ -233,6 +257,8 @@ def main(argv: list[str] | None = None) -> None:
                     overwrite=args.overwrite,
                     dry_run=False,
                     use_browser_fallback=args.use_browser_fallback,
+                    browser_mode=args.browser_mode,
+                    ledger=ledger,
                 )
             )
             if paths:
