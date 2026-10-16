@@ -1,6 +1,6 @@
 [project]
 name = "auto-paper-download"
-version = "0.3.0"
+version = "0.4.0"
 description = "Download full-text PDFs by DOI: open access first, then publisher TDM APIs, then your own logged-in browser. CLI, local web UI and agent skill."
 readme = "README.md"
 requires-python = ">=3.9"
