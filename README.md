@@ -10,6 +10,12 @@ switch it on. Polite by default: daily caps, per-site pacing, and automatic back
 <b>English</b> · <a href="README.zh-CN.md">简体中文</a>
 </p>
 
+<p align="center">
+<a href="LICENSE"><img alt="MIT" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
+<img alt="Python" src="https://img.shields.io/badge/python-3.9%2B-blue.svg">
+<a href="https://github.com/jxtse/auto-paper-harvester/actions/workflows/test.yml"><img alt="tests" src="https://github.com/jxtse/auto-paper-harvester/actions/workflows/test.yml/badge.svg"></a>
+</p>
+
 ---
 
 **You give it** DOIs, doi.org links, or a pasted reference list.
@@ -181,4 +187,5 @@ The scripts under `.claude/skills/paper-download/scripts/` are kept for existing
 
 ## License
 
-Not chosen yet. Until a license is added, please open an issue before reusing the code.
+[MIT](LICENSE). Downloaded papers keep their own licenses and publishers' terms; TDM keys are
+for the uses your agreement with the publisher allows.

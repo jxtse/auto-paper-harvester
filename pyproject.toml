@@ -11,10 +11,12 @@ dependencies = [
 authors = [
   { name = "Jinxiang Xie" },
 ]
+license = { text = "MIT" }
 keywords = ["doi", "pdf", "open-access", "unpaywall", "openalex", "crossref", "text-and-data-mining",
             "literature", "research-tools", "agent-skill"]
 classifiers = [
   "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
   "Intended Audience :: Science/Research",
   "Topic :: Scientific/Engineering",
   "Environment :: Console",

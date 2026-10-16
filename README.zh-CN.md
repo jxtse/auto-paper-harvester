@@ -9,6 +9,12 @@
 <a href="README.md">English</a> · <b>简体中文</b>
 </p>
 
+<p align="center">
+<a href="LICENSE"><img alt="MIT" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
+<img alt="Python" src="https://img.shields.io/badge/python-3.9%2B-blue.svg">
+<a href="https://github.com/jxtse/auto-paper-harvester/actions/workflows/test.yml"><img alt="tests" src="https://github.com/jxtse/auto-paper-harvester/actions/workflows/test.yml/badge.svg"></a>
+</p>
+
 ---
 
 **输入**：DOI、doi.org 链接，或直接粘贴一段参考文献列表。
@@ -170,4 +176,4 @@ uv venv && uv pip install -e '.[dev]' && .venv/bin/python -m pytest -q
 
 ## 许可证
 
-尚未确定。在加入许可证之前，如需复用代码请先开 issue 联系。
+代码使用 [MIT](LICENSE) 许可证。下载到的论文仍受其原有许可和出版社条款约束；TDM key 只能用于你与出版社协议允许的用途。
