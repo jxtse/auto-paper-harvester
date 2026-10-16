@@ -122,6 +122,78 @@ The persistent profile lives under a platform-specific cache directory by defaul
 - PDF integrity check (`%PDF-` magic bytes) — non-PDF payloads (CAPTCHA HTML)
   are rejected with `challenge_timeout`.
 
+## Real Chrome via the Playwright Extension
+
+`--browser-mode extension` runs the fallback inside the **Chrome you already use**, instead
+of a separate automation profile. Use it when:
+
+- a publisher's bot wall (Cloudflare on ACS, Akamai on MDPI, Radware on some others) keeps a
+  fresh Playwright profile on "Just a moment..." or "Access Denied";
+- you are already signed in to your institution in Chrome and don't want a second SSO login.
+
+### Setup (once)
+
+1. Install the official [Playwright Extension](https://chromewebstore.google.com/detail/playwright-extension/mmlmfjhmonkocbjadbfplnigmagldckm)
+   in Chrome and copy the token it shows.
+2. Install the CLI: `npm i -g @playwright/cli` (or point `PLAYWRIGHT_CLI` at the binary).
+3. Export the token. Keep it in a secret manager, not in shell history or a repo:
+   `export PLAYWRIGHT_MCP_EXTENSION_TOKEN=...`
+
+```bash
+python -m auto_paper_download --savedrecs savedrecs.xls \
+  --use-browser-fallback --browser-mode extension \
+  --ledger ~/.cache/auto_paper_download/ledger.sqlite
+```
+
+### How it works
+
+1. `playwright-cli attach --extension=chrome` attaches one named session to your running
+   Chrome. The tool works in one tab and never closes your browser or other tabs.
+2. It opens `https://doi.org/<DOI>` and waits up to ~40 s for a challenge page to clear
+   **on its own**. It never clicks a CAPTCHA. If the page is still a challenge, the publisher
+   goes into a 24 h cooldown and the browser pass stops so a human can look.
+3. Inside the page it finds the PDF link (`citation_pdf_url` meta tag, then PDF-looking links)
+   and fetches it with **`fetch(url, {credentials: 'include'})` in the page itself**. If the
+   response is an HTML wrapper (IEEE `stamp.jsp`), it follows the embedded `iframe`/`embed`
+   PDF URL.
+4. Only bytes starting with `%PDF-` are saved (to `<output-dir>/_browser_fallback/`).
+
+Two details that matter (verified on ACS, MDPI and IEEE, October 2026):
+
+- **Fetch inside the page.** Playwright's node-side `context.request` shares cookies but not
+  the browser's network fingerprint. ACS answered it with a Cloudflare 403 HTML page while the
+  same URL fetched from the page returned the PDF.
+- **Why not CDP auto-connect?** `--cdp=chrome`, `chrome-devtools-mcp --autoConnect` and
+  `agent-browser --auto-connect` all read `DevToolsActivePort` from the Chrome profile dir.
+  On macOS a background process (agent, launchd job, terminal without Full Disk Access) gets
+  `EPERM` there. The extension relay does not need that file as long as
+  `PLAYWRIGHT_MCP_EXECUTABLE_PATH` points at the Chrome binary (the tool sets the platform
+  default for you).
+
+### Environment variables (extension mode)
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `PLAYWRIGHT_MCP_EXTENSION_TOKEN` | (required) | Token shown by the Playwright Extension |
+| `PLAYWRIGHT_CLI` | `playwright-cli` on `PATH` | Path to the CLI binary |
+| `PLAYWRIGHT_CLI_SESSION` | `auto-paper` | Session name |
+| `PLAYWRIGHT_MCP_EXECUTABLE_PATH` | platform Chrome path | Chrome binary |
+| `PWTEST_EXTENSION_CONNECT_TIMEOUT` | `60000` | Attach timeout (ms) |
+
+### Results
+
+| Status | Meaning |
+|---|---|
+| `ok` | PDF saved |
+| `challenge` | Bot wall did not clear by itself; publisher in cooldown, pass stopped |
+| `fail` | No PDF link, non-PDF response (often: no subscription), or HTTP error |
+| `rate_limited` | Refused by `--ledger` before any request was sent |
+| `unavailable` | CLI or token missing |
+
+A non-PDF `fail` with HTTP 200 usually means your institution does not subscribe to that
+journal (e.g. IOP pages saying "not registered by an institution with a subscription"). That
+is not a tool error and retrying will not help.
+
 ## Troubleshooting
 
 - **`playwright: command not found`** → `pip install playwright && playwright install chromium`
@@ -135,5 +207,8 @@ The persistent profile lives under a platform-specific cache directory by defaul
 - **`challenge_timeout`** → the publisher served a CAPTCHA or login HTML when
   it should have returned a PDF. Usually means your institutional session expired;
   log in again via the Chromium window and rerun.
+- **"Just a moment..." / "Access Denied" forever** → bot wall against the automation
+  profile. Switch to `--browser-mode extension` (above). Do not loop retries; that is how
+  IPs get banned. Use `--ledger` so the cooldown sticks across runs.
 - **First-run profile is empty / no SSO** → make sure you ran a session at least
   once in headed mode (don't set `BROWSER_FALLBACK_HEADLESS=1` for the first run).

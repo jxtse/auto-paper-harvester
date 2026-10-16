@@ -133,6 +133,28 @@ platform equivalent) for subsequent runs. See
 for cross-browser options (Chrome / Edge / Brave), headless vs headed, profile
 paths, and every `BROWSER_FALLBACK_*` env var.
 
+**Bot walls (Cloudflare / Akamai)?** Publishers such as ACS and MDPI often keep a fresh
+automation profile on a "Just a moment..." page. Use `--browser-mode extension` to run the
+fallback inside the Chrome you already use (via the official
+[Playwright Extension](https://chromewebstore.google.com/detail/playwright-extension/mmlmfjhmonkocbjadbfplnigmagldckm)):
+
+```bash
+npm i -g @playwright/cli
+export PLAYWRIGHT_MCP_EXTENSION_TOKEN=...   # shown by the extension
+python -m auto_paper_download --savedrecs savedrecs.xls \
+  --use-browser-fallback --browser-mode extension --ledger ~/.cache/auto_paper_download/ledger.sqlite
+```
+
+See [docs/BROWSER_FALLBACK.md § Real Chrome via the Playwright Extension](docs/BROWSER_FALLBACK.md#real-chrome-via-the-playwright-extension).
+
+#### 4. Stay under the radar: daily caps and cooldowns
+
+Publishers ban IPs, and a per-run `--delay` does not help when you run the tool several
+times a day. `--ledger PATH` (or `AUTO_PAPER_LEDGER=PATH`) keeps a small SQLite file that
+enforces **daily caps per channel, a minimum gap per host across runs, and a 6–24 h
+cooldown after a 429 / CAPTCHA / "Access Denied"**. Screen first, download only what you
+need. Defaults and overrides: [docs/RATE_LIMITS.md](docs/RATE_LIMITS.md).
+
 ### Common flags
 
 | Flag | Purpose |
@@ -144,6 +166,8 @@ paths, and every `BROWSER_FALLBACK_*` env var.
 | `--overwrite` | Re-download even if file exists |
 | `--dry-run` | Show routing plan, don't download |
 | `--use-browser-fallback` | Enable Playwright second pass |
+| `--browser-mode {playwright,extension}` | Own Chromium profile (default) or your running Chrome via the Playwright Extension |
+| `--ledger <path>` | Persistent daily caps, per-host pacing, block cooldowns (recommended) |
 | `--verbose` | Debug logs |
 
 `download_multiple_dois.py` adds: `--doi-file`, `--resume`, `--checkpoint-file`,
@@ -236,6 +260,8 @@ Apply these rules without asking the user every time:
 | User didn't explicitly say "redownload" | **Don't add `--overwrite`** — cached files should stay |
 | First time with `--use-browser-fallback` on this machine | **Warn before launch**: "A browser window will open — please complete your university SSO login once; cookies will be cached for next time." |
 | User's `.env` is missing or has no credentials | **Surface the warning verbatim** — don't proceed silently. Ask which credentials they have and offer to edit `.env` |
+| Always | **Add `--ledger ~/.cache/auto_paper_download/ledger.sqlite`** — daily caps and cooldowns survive across runs |
+| Browser fallback lands on "Just a moment..." / "Access Denied", and `PLAYWRIGHT_MCP_EXTENSION_TOKEN` is set | **Use `--browser-mode extension`** — runs in the user's own Chrome. Never click a CAPTCHA for the user; if the page doesn't clear by itself, stop and tell them |
 
 ### Step 3 — Invoke
 

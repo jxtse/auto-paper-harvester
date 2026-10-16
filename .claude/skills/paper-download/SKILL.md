@@ -42,6 +42,8 @@ description: >
 | DOI file has > 100 entries | Add `--resume --batch-size 500` |
 | User didn't say "redownload" / "refresh" | Don't add `--overwrite` |
 | First `--use-browser-fallback` on this machine | Warn: "A Chromium window will open — please complete your university SSO login once; cookies are cached for next time" |
+| Always | Add `--ledger ~/.cache/auto_paper_download/ledger.sqlite` so caps and cooldowns persist across runs |
+| `PLAYWRIGHT_MCP_EXTENSION_TOKEN` is set and the list has ACS / MDPI / other bot-walled publishers | Add `--browser-mode extension` |
 
 ## Commands
 
@@ -100,6 +102,8 @@ Publisher PDF download summary:
 | Flag | Purpose |
 |---|---|
 | `--use-browser-fallback` | Enable Playwright second pass (see auto-flag rules above) |
+| `--browser-mode extension` | Run the browser pass in the user's own Chrome (Playwright Extension; needs `PLAYWRIGHT_MCP_EXTENSION_TOKEN`) |
+| `--ledger <path>` | Persistent daily caps / per-host gap / cooldowns. Use it by default |
 | `--resume` | Skip DOIs in the checkpoint (multi-DOI script) |
 | `--batch-size N` / `--batch-index I` | Process slice `[I*N, (I+1)*N)` |
 | `--delay <sec>` | Throttle between requests (≥ 1.0s enforced) |
@@ -119,6 +123,9 @@ Publisher PDF download summary:
 | `no_link` in browser fallback | Publisher updated their layout; selector list in [docs/SUPPORTED_PUBLISHERS.md](../../../docs/SUPPORTED_PUBLISHERS.md#adding-a-new-publisher) |
 | Springer 403 on a DOI user has access to | Springer API serves OA only; rerun with `--use-browser-fallback` |
 | All ACS/RSC DOIs fail and no `--use-browser-fallback` was used | Re-invoke with the flag (no TDM API for these publishers) |
+| `challenge_timeout` / "Just a moment..." / Akamai "Access Denied" | Bot wall. Do not retry in a loop. If the user has the Playwright Extension, rerun with `--browser-mode extension`; otherwise report it |
+| `challenge` in extension mode | Page did not clear by itself; the publisher is in a 24 h cooldown. Never solve the CAPTCHA for the user; tell them |
+| `rate_limited: ...` | Daily cap or cooldown from `--ledger`. Report it; do not raise limits unless the user asks |
 
 For deeper troubleshooting of the browser fallback (channels, profile location,
 headless vs headed, all env vars), see

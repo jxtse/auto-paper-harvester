@@ -22,6 +22,7 @@ from .clients import (
     WileyClient,
     batched_download,
 )
+from .ratelimit import Ledger, LimitReached
 from .publishers import (
     classify_publisher as _classify_publisher_info,
     family_to_legacy_publisher,
@@ -208,6 +209,8 @@ def download_from_savedrecs(
     overwrite: bool = False,
     dry_run: bool = False,
     use_browser_fallback: bool = False,
+    browser_mode: str = "playwright",
+    ledger: Optional[Ledger] = None,
   ) -> Iterator[Path]:
       """
       Download PDFs (and any discoverable SI files) referenced in ``savedrecs.xls`` while honoring publisher rate limits.
@@ -231,6 +234,8 @@ def download_from_savedrecs(
           dry_run=dry_run,
           load_env=False,
           use_browser_fallback=use_browser_fallback,
+          browser_mode=browser_mode,
+          ledger=ledger,
       )
 
 
@@ -244,15 +249,24 @@ def download_from_dois(
     dry_run: bool = False,
     load_env: bool = True,
     use_browser_fallback: bool = False,
+    browser_mode: str = "playwright",
+    ledger: Optional[Ledger] = None,
 ) -> Iterator[Path]:
     """
     Download PDFs for the provided DOI list using the configured publisher clients.
 
     ``dois`` may be any iterable; it is consumed eagerly so the caller can supply generators.
     Set ``load_env`` to ``False`` when credentials are injected programmatically.
+
+    ``browser_mode`` selects the browser fallback: ``"playwright"`` (own Chromium profile,
+    :mod:`browser_fallback`) or ``"extension"`` (your running Chrome via the Playwright
+    Extension, :mod:`real_browser`). ``ledger`` enables persistent daily caps, per-host
+    pacing and cooldowns (see :mod:`ratelimit`); when omitted, ``AUTO_PAPER_LEDGER`` is used.
     """
     if load_env:
         load_env_file()
+    if ledger is None:
+        ledger = Ledger.from_env()
 
     doi_list = list(dois)
     if not doi_list:
@@ -273,6 +287,8 @@ def download_from_dois(
         overwrite=overwrite,
         dry_run=dry_run,
         use_browser_fallback=use_browser_fallback,
+        browser_mode=browser_mode,
+        ledger=ledger,
     )
 
 
@@ -293,8 +309,12 @@ def _execute_download(
     overwrite: bool,
     dry_run: bool,
     use_browser_fallback: bool = False,
+    browser_mode: str = "playwright",
+    ledger: Optional[Ledger] = None,
 ) -> Iterator[Path]:
     records = list(records)
+    if ledger is not None:
+        LOGGER.info("Rate-limit ledger: %s", ledger.path)
     disabled_publishers: list[str] = []
 
     def has_records(publisher_name: str) -> bool:
@@ -433,6 +453,7 @@ def _execute_download(
             delay_seconds=enforced_delay,
             raise_on_error=False,
             metrics=metrics,
+            ledger=ledger,
         )
     except DownloadError as exc:
         LOGGER.error("Publisher download failed: %s", exc)
@@ -448,6 +469,8 @@ def _execute_download(
             overwrite: bool,
             records: list[ArticleRecord],
             run_browser_fallback: bool,
+            browser_mode: str,
+            ledger: Optional[Ledger],
         ):
             self._iterator = iterator
             self.metrics = stats
@@ -455,6 +478,8 @@ def _execute_download(
             self._overwrite = overwrite
             self._records = records
             self._run_browser_fallback = run_browser_fallback
+            self._browser_mode = browser_mode
+            self._ledger = ledger
             self._fallback_done = False
 
         def __iter__(self) -> "DownloadStream":
@@ -472,6 +497,8 @@ def _execute_download(
                         records=self._records,
                         output_dir=self._output_dir,
                         overwrite=self._overwrite,
+                        browser_mode=self._browser_mode,
+                        ledger=self._ledger,
                     )
                     return next(self._iterator)
                 raise
@@ -483,6 +510,8 @@ def _execute_download(
         overwrite=overwrite,
         records=records,
         run_browser_fallback=use_browser_fallback,
+        browser_mode=browser_mode,
+        ledger=ledger,
     )
 
 
@@ -492,6 +521,8 @@ def _iter_browser_fallback(
     records: list[ArticleRecord],
     output_dir: Path,
     overwrite: bool,
+    browser_mode: str = "playwright",
+    ledger: Optional[Ledger] = None,
 ) -> Iterator[Path]:
     """
     Second-pass downloader: walks every DOI that failed the API/OA pipeline and tries
@@ -508,6 +539,18 @@ def _iter_browser_fallback(
 
     if not failed:
         LOGGER.info("Browser fallback: nothing to retry (no failed DOIs).")
+        return
+
+    # Skip DOIs that were refused by the rate limiter: retrying them in a browser would
+    # defeat the purpose of the cap / cooldown.
+    failed = [e for e in failed if not str(e.get("reason", "")).startswith("rate_limited")]
+    if not failed:
+        LOGGER.info("Browser fallback: nothing to retry.")
+        return
+
+    if browser_mode == "extension":
+        yield from _iter_real_browser(failed=failed, metrics=metrics, output_dir=output_dir,
+                                      overwrite=overwrite, ledger=ledger)
         return
 
     # Lazy import so the package still works without playwright installed
@@ -535,6 +578,14 @@ def _iter_browser_fallback(
         doi = entry.get("doi")
         if not doi:
             continue
+        host = "browser:" + doi.split("/", 1)[0]
+        if ledger is not None:
+            try:
+                ledger.acquire("browser", host)
+            except LimitReached as exc:
+                fallback_bucket["failed_dois"].append({"doi": doi, "reason": f"rate_limited: {exc}"})
+                LOGGER.warning("Browser fallback: rate limit, skipping %s (%s)", doi, exc)
+                continue
         fallback_bucket["attempted"] += 1
         family = doi_to_family.get(doi, "unknown")
         # Store each browser-fallback PDF in a dedicated subdir to avoid colliding
@@ -546,6 +597,11 @@ def _iter_browser_fallback(
             publisher_family=family,
             overwrite=overwrite,
         )
+        if ledger is not None:
+            ledger.record("browser", host, doi, "ok" if result.success else "fail", None, 0,
+                          "" if result.success else f"{result.status}: {result.reason}")
+            if result.status == "challenge_timeout":
+                ledger.block(host, f"challenge: {result.reason}"[:200])
         if result.success and result.saved_path is not None:
             fallback_bucket["succeeded"] += 1
             LOGGER.info("Browser fallback recovered %s -> %s", doi, result.saved_path)
@@ -557,3 +613,52 @@ def _iter_browser_fallback(
             })
             LOGGER.info("Browser fallback could not recover %s (%s: %s)",
                         doi, result.status, result.reason)
+
+
+def _iter_real_browser(
+    *,
+    failed: list[dict[str, str]],
+    metrics: dict[str, dict[str, int]],
+    output_dir: Path,
+    overwrite: bool,
+    ledger: Optional[Ledger],
+) -> Iterator[Path]:
+    """Browser pass through the user's running Chrome (Playwright Extension).
+
+    Stops the whole pass on the first challenge page that does not clear by itself, so a
+    human can look at it instead of the tool hammering a bot wall.
+    """
+    from .real_browser import RealBrowser
+
+    bucket = metrics.setdefault(
+        "RealBrowser", {"attempted": 0, "succeeded": 0, "failed_dois": []}
+    )
+    browser = RealBrowser(ledger=ledger)
+    ok, why = browser.available()
+    if not ok:
+        LOGGER.warning("Real-browser fallback unavailable: %s", why)
+        for entry in failed:
+            bucket["failed_dois"].append({"doi": entry["doi"], "reason": f"unavailable: {why}"})
+        return
+    LOGGER.info("Real-browser fallback: retrying %d failed DOIs in your Chrome", len(failed))
+    try:
+        for entry in failed:
+            doi = entry.get("doi")
+            if not doi:
+                continue
+            result = browser.download(doi, output_dir / "_browser_fallback", overwrite=overwrite)
+            if result.status != "rate_limited":
+                bucket["attempted"] += 1
+            if result.success and result.saved_path is not None:
+                bucket["succeeded"] += 1
+                LOGGER.info("Real browser recovered %s -> %s", doi, result.saved_path)
+                yield result.saved_path
+                continue
+            bucket["failed_dois"].append({"doi": doi, "reason": f"{result.status}: {result.reason}"})
+            LOGGER.info("Real browser could not recover %s (%s: %s)", doi, result.status, result.reason)
+            if result.status == "challenge":
+                LOGGER.warning("Challenge page did not clear; stopping the browser pass. "
+                               "Open the page in Chrome yourself, then rerun.")
+                break
+    finally:
+        browser.detach()

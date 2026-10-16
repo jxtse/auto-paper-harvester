@@ -12,6 +12,7 @@ from typing import Iterable
 
 from .clients import DownloadError
 from .downloader import DEFAULT_DELAY_SECONDS, download_from_savedrecs
+from .ratelimit import Ledger
 
 LOGGER = logging.getLogger("auto_paper_download.cli")
 
@@ -67,6 +68,24 @@ def build_parser() -> argparse.ArgumentParser:
             "Playwright-driven Chromium session that reuses your institutional cookies. "
             "Useful for ACS / RSC / IEEE / AIP / IOP / APS publishers that have no "
             "public TDM API. Requires: pip install playwright && playwright install chromium."
+        ),
+    )
+    parser.add_argument(
+        "--browser-mode",
+        choices=("playwright", "extension"),
+        default="playwright",
+        help=(
+            "Browser used by --use-browser-fallback. 'playwright' launches its own Chromium "
+            "profile; 'extension' drives your running Chrome through the Playwright Extension "
+            "(needs playwright-cli and PLAYWRIGHT_MCP_EXTENSION_TOKEN). See docs/BROWSER_FALLBACK.md."
+        ),
+    )
+    parser.add_argument(
+        "--ledger",
+        type=Path,
+        help=(
+            "SQLite file for persistent daily caps, per-host pacing and block cooldowns "
+            "(also AUTO_PAPER_LEDGER). Recommended for any repeated use. See docs/RATE_LIMITS.md."
         ),
     )
     parser.add_argument("--verbose", action="store_true", help="Enable debug logging.")
@@ -147,6 +166,7 @@ def main(argv: list[str] | None = None) -> None:
         joined = ", ".join(missing)
         raise SystemExit(f"savedrecs input file(s) not found: {joined}")
 
+    ledger = Ledger(args.ledger) if args.ledger else Ledger.from_env()
     downloads: list[Path] = []
     aggregate_metrics: defaultdict[str, dict[str, object]] = defaultdict(
         lambda: {"attempted": 0, "succeeded": 0, "failed_dois": []}
@@ -162,6 +182,8 @@ def main(argv: list[str] | None = None) -> None:
                 overwrite=args.overwrite,
                 dry_run=args.dry_run,
                 use_browser_fallback=args.use_browser_fallback,
+                browser_mode=args.browser_mode,
+                ledger=ledger,
             )
             downloaded_paths = list(download_iter)
             downloads.extend(downloaded_paths)
