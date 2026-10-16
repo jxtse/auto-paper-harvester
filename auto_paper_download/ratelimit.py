@@ -10,8 +10,9 @@ SQLite so the limits hold across runs and processes:
 
 1. **Daily caps** per channel (successful downloads AND attempts) plus a global
    successful-download cap, counted per local calendar day.
-2. **Per-host spacing**: a minimum gap (+ random jitter) between two requests to the
-   same host, whatever process sent the previous one.
+2. **Per-host spacing**: a minimum gap (+ random jitter) between two HTTP requests to
+   the same host (the real host of every request, redirects included), whatever process
+   sent the previous one. See :class:`PacedAdapter`.
 3. **Cooldowns**: after a block signal (HTTP 429, CAPTCHA / challenge page, Akamai
    "Access Denied") the host is refused for 6-24 h instead of retried.
 
@@ -33,7 +34,10 @@ import sqlite3
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
+from urllib.parse import urlsplit
+
+from requests.adapters import HTTPAdapter
 
 # channel -> daily successful downloads, daily attempts, min seconds between two requests
 # to one host, extra random jitter seconds.
@@ -46,9 +50,20 @@ DEFAULT_LIMITS: dict[str, dict[str, float]] = {
     "browser":  dict(daily_ok=12, daily_attempts=20, gap_s=60.0, jitter_s=60.0),  # real browser session
 }
 GLOBAL_DAILY_OK = 80          # all channels together
-PER_HOST_DAILY_ATTEMPTS = 25  # any single host, any channel
+PER_HOST_DAILY_ATTEMPTS = 25    # browser attempts per publisher (DOI prefix) per day
+PER_HOST_DAILY_REQUESTS = 100   # HTTP requests to one publisher host per day (one paper
+                                # with supplements can take ~10 requests)
 COOLDOWN_S = 24 * 3600        # after a bot-wall signal
 COOLDOWN_429_S = 6 * 3600     # after HTTP 429
+PENDING_TTL_S = 3600          # a reservation older than this is treated as a crashed run
+
+# Metadata / resolver APIs shared by every channel. They are paced lightly (they publish
+# their own generous limits) and are exempt from the per-host daily cap; their use is
+# bounded by the per-channel paper caps instead.
+METADATA_HOSTS = {"api.openalex.org", "api.crossref.org", "api.unpaywall.org", "doi.org", "dx.doi.org"}
+METADATA_GAP_S, METADATA_JITTER_S = 1.0, 1.0
+# Publisher TDM APIs: paced with the channel gap, exempt from the per-host daily cap.
+VENDOR_API_HOSTS = {"api.elsevier.com", "api.wiley.com", "api.springernature.com"}
 
 _BLOCK_PATTERNS = (b"captcha", b"cf-chl", b"just a moment", b"verify you are human",
                    b"attention required", b"are you a robot")
@@ -56,6 +71,10 @@ _BLOCK_PATTERNS = (b"captcha", b"cf-chl", b"just a moment", b"verify you are hum
 
 class LimitReached(RuntimeError):
     """Raised when a request is not allowed right now (cap reached or host cooling down)."""
+
+
+class HostLimited(LimitReached):
+    """One HTTP host is cooling down or at its daily cap; other routes (e.g. a browser) may still work."""
 
 
 def block_signal(status: Optional[int], body: bytes = b"") -> Optional[float]:
@@ -95,26 +114,35 @@ def _env_limits(limits: dict[str, dict[str, float]]) -> dict[str, dict[str, floa
 
 @dataclass
 class Ledger:
-    """SQLite-backed rate limiter. Safe to share between processes (one file, short transactions)."""
+    """SQLite-backed rate limiter, safe to share between processes.
+
+    Every check-and-reserve runs inside one ``BEGIN IMMEDIATE`` transaction, so two
+    processes cannot both take the last slot of a cap or the same per-host time slot.
+    """
 
     path: Path
     limits: dict = field(default_factory=lambda: _env_limits(DEFAULT_LIMITS))
     global_daily_ok: int = int(os.environ.get("AUTO_PAPER_GLOBAL_DAILY_OK", GLOBAL_DAILY_OK))
     per_host_daily: int = int(os.environ.get("AUTO_PAPER_PER_HOST_DAILY", PER_HOST_DAILY_ATTEMPTS))
+    per_host_daily_requests: int = int(
+        os.environ.get("AUTO_PAPER_PER_HOST_DAILY_REQUESTS", PER_HOST_DAILY_REQUESTS))
 
     def __post_init__(self) -> None:
         self.path = Path(self.path).expanduser()
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.db = sqlite3.connect(self.path, timeout=30)
+        # Autocommit mode; write transactions are opened explicitly with BEGIN IMMEDIATE.
+        self.db = sqlite3.connect(self.path, timeout=60, isolation_level=None)
         self.db.executescript(
             """
             create table if not exists attempts(ts real, day text, channel text, host text, doi text,
                                                 status text, http int, bytes int, note text);
             create table if not exists cooldown(host text primary key, until real, reason text);
+            create table if not exists requests(ts real, day text, host text, channel text);
+            create table if not exists hosts(host text primary key, next_ts real);
             create index if not exists a_day on attempts(day, channel);
+            create index if not exists r_day on requests(day, host);
             """
         )
-        self.db.commit()
 
     @classmethod
     def from_env(cls) -> Optional["Ledger"]:
@@ -125,10 +153,32 @@ class Ledger:
     def today() -> str:
         return time.strftime("%Y-%m-%d")
 
+    # -- helpers -------------------------------------------------------------------------
+    def _tx(self):
+        db = self.db
+
+        class _T:
+            def __enter__(self_inner):
+                db.execute("begin immediate")
+                return db
+
+            def __exit__(self_inner, exc_type, *_):
+                db.execute("rollback" if exc_type else "commit")
+                return False
+
+        return _T()
+
     def _count(self, where: str, args: tuple) -> int:
         return self.db.execute(
             f"select count(*) from attempts where day=? and {where}", (self.today(), *args)
         ).fetchone()[0]
+
+    def _ok_or_pending(self, where: str, args: tuple) -> int:
+        # A live reservation might still succeed, so it counts against success caps.
+        return self._count(
+            f"(status='ok' or (status='pending' and ts>?)) and {where}",
+            (time.time() - PENDING_TTL_S, *args),
+        )
 
     def _lim(self, channel: str) -> dict[str, float]:
         return self.limits.get(channel) or self.limits["oa"]
@@ -153,39 +203,142 @@ class Ledger:
             return f"{host} in cooldown until {time.strftime('%F %T', time.localtime(row[0]))}: {row[1]}"
         return None
 
-    def check(self, channel: str, host: str) -> None:
-        """Raise :class:`LimitReached` if a request on (channel, host) is not allowed today."""
+    def _check(self, channel: str, host: Optional[str]) -> None:
         lim = self._lim(channel)
-        msg = self.cooling(host)
-        if msg:
-            raise LimitReached(msg)
-        if self._count("status='ok'", ()) >= self.global_daily_ok:
+        if host:
+            msg = self.cooling(host)
+            if msg:
+                raise LimitReached(msg)
+        if self._ok_or_pending("1", ()) >= self.global_daily_ok:
             raise LimitReached(f"global daily cap {self.global_daily_ok} reached")
-        if self._count("channel=? and status='ok'", (channel,)) >= lim["daily_ok"]:
+        if self._ok_or_pending("channel=?", (channel,)) >= lim["daily_ok"]:
             raise LimitReached(f"{channel} daily download cap {int(lim['daily_ok'])} reached")
         if self._count("channel=?", (channel,)) >= lim["daily_attempts"]:
             raise LimitReached(f"{channel} daily attempt cap {int(lim['daily_attempts'])} reached")
-        if self._count("host=?", (host,)) >= self.per_host_daily:
+        if host and self._count("host=?", (host,)) >= self.per_host_daily:
             raise LimitReached(f"{host} daily attempt cap {self.per_host_daily} reached")
 
-    def acquire(self, channel: str, host: str) -> None:
-        """:meth:`check`, then sleep until the per-host gap (+ jitter) since the last request has passed."""
-        self.check(channel, host)
+    def _reserve_slot(self, host: str, gap: float, jitter: float) -> float:
+        """Inside a transaction: return the earliest allowed start time and book the next one."""
+        now = time.time()
+        row = self.db.execute("select next_ts from hosts where host=?", (host,)).fetchone()
+        last = self.db.execute("select max(ts) from attempts where host=?", (host,)).fetchone()[0]
+        earliest = max(row[0] if row else 0.0, (last or 0.0) + gap)
+        slot = max(now, earliest)
+        self.db.execute("insert or replace into hosts values(?,?)",
+                        (host, slot + gap + random.uniform(0, jitter)))
+        return slot
+
+    # -- paper-level API -----------------------------------------------------------------
+    def check(self, channel: str, host: Optional[str] = None) -> None:
+        """Raise :class:`LimitReached` if one more attempt on (channel, host) is not allowed."""
+        self._check(channel, host)
+
+    def acquire(self, channel: str, host: Optional[str] = None, *, pace: bool = True) -> int:
+        """Atomically check the caps, reserve one attempt and (if ``pace``) a per-host time slot,
+        then sleep until that slot. Returns a reservation id for :meth:`record`.
+
+        ``host=None`` reserves against the channel and global caps only (per-host pacing is
+        then done per HTTP request by :class:`PacedAdapter`).
+        """
         lim = self._lim(channel)
-        last = self.db.execute("select max(ts) from attempts where host=?", (host,)).fetchone()[0] or 0
-        wait = last + lim["gap_s"] + random.uniform(0, lim["jitter_s"]) - time.time()
+        with self._tx():
+            self._check(channel, host)
+            slot = time.time()
+            if host and pace:
+                slot = self._reserve_slot(host, lim["gap_s"], lim["jitter_s"])
+            cur = self.db.execute(
+                "insert into attempts values(?,?,?,?,?,?,?,?,?)",
+                (slot, self.today(), channel, host or "", "", "pending", None, 0, ""),
+            )
+            rid = cur.lastrowid
+        wait = slot - time.time()
+        if wait > 0:
+            time.sleep(wait)
+        return rid
+
+    def record(self, channel: str, host: Optional[str], doi: str, status: str,
+               http: Optional[int] = None, nbytes: int = 0, note: str = "",
+               reservation: Optional[int] = None) -> None:
+        """Finalize a reservation from :meth:`acquire`, or log a new attempt if none is given."""
+        with self._tx():
+            if reservation is not None:
+                self.db.execute(
+                    "update attempts set doi=?, status=?, http=?, bytes=?, note=? where rowid=?",
+                    (doi, status, http, nbytes, note[:300], reservation),
+                )
+            else:
+                self.db.execute(
+                    "insert into attempts values(?,?,?,?,?,?,?,?,?)",
+                    (time.time(), self.today(), channel, host or "", doi, status, http, nbytes,
+                     note[:300]),
+                )
+
+    def block(self, host: str, reason: str, seconds: float = COOLDOWN_S) -> None:
+        with self._tx():
+            self.db.execute("insert or replace into cooldown values(?,?,?)",
+                            (host, time.time() + seconds, reason[:200]))
+
+    # -- request-level API (used by PacedAdapter) ----------------------------------------
+    def pace_request(self, host: str, channel: str) -> None:
+        """Before one HTTP request: honour cooldown, per-host daily cap and per-host gap."""
+        if host in METADATA_HOSTS:
+            gap, jitter, capped = METADATA_GAP_S, METADATA_JITTER_S, False
+        else:
+            lim = self._lim(channel)
+            gap, jitter, capped = lim["gap_s"], lim["jitter_s"], host not in VENDOR_API_HOSTS
+        with self._tx():
+            msg = self.cooling(host)
+            if msg:
+                raise HostLimited(msg)
+            if capped:
+                n = self.db.execute("select count(*) from requests where day=? and host=?",
+                                    (self.today(), host)).fetchone()[0]
+                if n >= self.per_host_daily_requests:
+                    raise HostLimited(f"{host} daily request cap {self.per_host_daily_requests} reached")
+            slot = self._reserve_slot(host, gap, jitter)
+            self.db.execute("insert into requests values(?,?,?,?)", (slot, self.today(), host, channel))
+        wait = slot - time.time()
         if wait > 0:
             time.sleep(wait)
 
-    def record(self, channel: str, host: str, doi: str, status: str, http: Optional[int] = None,
-               nbytes: int = 0, note: str = "") -> None:
-        self.db.execute(
-            "insert into attempts values(?,?,?,?,?,?,?,?,?)",
-            (time.time(), self.today(), channel, host, doi, status, http, nbytes, note[:300]),
-        )
-        self.db.commit()
 
-    def block(self, host: str, reason: str, seconds: float = COOLDOWN_S) -> None:
-        self.db.execute("insert or replace into cooldown values(?,?,?)",
-                        (host, time.time() + seconds, reason[:200]))
-        self.db.commit()
+class PacedAdapter(HTTPAdapter):
+    """``requests`` transport adapter that routes every request through a :class:`Ledger`.
+
+    Mount it on a session (``session.mount("https://", PacedAdapter(ledger, ...))``). Each
+    request, including every redirect hop, is paced and capped by its real host, and a
+    429 / CAPTCHA / Akamai "Access Denied" response puts that host into cooldown.
+    ``channel`` may be a string or a zero-argument callable returning the current channel.
+    """
+
+    def __init__(self, ledger: Ledger, channel: "str | Callable[[], str]" = "oa", **kw):
+        super().__init__(**kw)
+        self.ledger = ledger
+        self._channel = channel
+
+    def send(self, request, **kwargs):  # type: ignore[override]
+        host = (urlsplit(request.url).hostname or "").lower()
+        channel = self._channel() if callable(self._channel) else self._channel
+        self.ledger.pace_request(host, channel)
+        response = super().send(request, **kwargs)
+        if response.status_code in (403, 429, 503):
+            try:
+                body = response.content[:20000]  # cached, later reads still work
+            except Exception:  # noqa: BLE001
+                body = b""
+            cooldown = block_signal(response.status_code, body)
+            if cooldown:
+                self.ledger.block(host, f"HTTP {response.status_code} block signal ({channel})",
+                                  seconds=cooldown)
+        return response
+
+
+def install(ledger: Ledger, sessions, channel: "str | Callable[[], str]") -> None:
+    """Mount a :class:`PacedAdapter` on each ``requests.Session`` in ``sessions``."""
+    for s in sessions:
+        if s is None:
+            continue
+        adapter = PacedAdapter(ledger, channel)
+        s.mount("https://", adapter)
+        s.mount("http://", adapter)

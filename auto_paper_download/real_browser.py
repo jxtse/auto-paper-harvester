@@ -51,7 +51,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from .ratelimit import COOLDOWN_429_S, COOLDOWN_S, Ledger, LimitReached
+from .ratelimit import COOLDOWN_S, Ledger, LimitReached, block_signal
 
 LOGGER = logging.getLogger(__name__)
 
@@ -186,9 +186,10 @@ class RealBrowser:
             return RealBrowserResult(doi, "unavailable", reason=why)
 
         host = "browser:" + doi.split("/", 1)[0]  # pace per publisher (DOI prefix)
+        rid: Optional[int] = None
         if self.ledger:
             try:
-                self.ledger.acquire("browser", host)
+                rid = self.ledger.acquire("browser", host)
             except LimitReached as exc:
                 return RealBrowserResult(doi, "rate_limited", reason=str(exc))
 
@@ -197,7 +198,7 @@ class RealBrowser:
             if self.ledger:
                 if cooldown:
                     self.ledger.block(host, reason, seconds=cooldown)
-                self.ledger.record("browser", host, doi, "fail", http, nbytes, reason)
+                self.ledger.record("browser", host, doi, "fail", http, nbytes, reason, reservation=rid)
             return RealBrowserResult(doi, status, reason=reason, http=http, url=url)
 
         try:
@@ -218,11 +219,13 @@ class RealBrowser:
             return _fail("fail", "no PDF link or no result from page")
         status, ctype, body, url = parsed
         if status != 200 or body[:5] != b"%PDF-":
-            cool = COOLDOWN_429_S if status == 429 else (COOLDOWN_S if status == 403 else None)
+            # Only real block signals cool the publisher down. A plain 403 here is usually a
+            # paywall / missing entitlement, which says nothing about the next DOI.
+            cool = block_signal(status, body)
             return _fail("fail", f"HTTP {status} {ctype} (not a PDF)", http=status, nbytes=len(body),
                          cooldown=cool, url=url)
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(body)
         if self.ledger:
-            self.ledger.record("browser", host, doi, "ok", status, len(body), url[:200])
+            self.ledger.record("browser", host, doi, "ok", status, len(body), url[:200], reservation=rid)
         return RealBrowserResult(doi, "ok", dest, http=status, url=url)

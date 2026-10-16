@@ -579,9 +579,10 @@ def _iter_browser_fallback(
         if not doi:
             continue
         host = "browser:" + doi.split("/", 1)[0]
+        rid = None
         if ledger is not None:
             try:
-                ledger.acquire("browser", host)
+                rid = ledger.acquire("browser", host)
             except LimitReached as exc:
                 fallback_bucket["failed_dois"].append({"doi": doi, "reason": f"rate_limited: {exc}"})
                 LOGGER.warning("Browser fallback: rate limit, skipping %s (%s)", doi, exc)
@@ -599,7 +600,8 @@ def _iter_browser_fallback(
         )
         if ledger is not None:
             ledger.record("browser", host, doi, "ok" if result.success else "fail", None, 0,
-                          "" if result.success else f"{result.status}: {result.reason}")
+                          "" if result.success else f"{result.status}: {result.reason}",
+                          reservation=rid)
             if result.status == "challenge_timeout":
                 ledger.block(host, f"challenge: {result.reason}"[:200])
         if result.success and result.saved_path is not None:

@@ -4,7 +4,18 @@ import time
 import pytest
 
 from auto_paper_download import ratelimit
-from auto_paper_download.ratelimit import Ledger, LimitReached, block_signal, block_signal_from_message
+import multiprocessing as mp
+
+import requests
+
+from auto_paper_download.ratelimit import (
+    HostLimited,
+    Ledger,
+    LimitReached,
+    PacedAdapter,
+    block_signal,
+    block_signal_from_message,
+)
 from auto_paper_download.real_browser import RealBrowser, parse_pdf_result
 
 
@@ -18,8 +29,8 @@ def _ledger(tmp_path, **over):
 def test_daily_success_cap(tmp_path):
     led = _ledger(tmp_path, browser=dict(daily_ok=2, gap_s=0, jitter_s=0))
     for i in range(2):
-        led.acquire("browser", "browser:10.1021")
-        led.record("browser", "browser:10.1021", f"10.1021/x{i}", "ok")
+        rid = led.acquire("browser", "browser:10.1021")
+        led.record("browser", "browser:10.1021", f"10.1021/x{i}", "ok", reservation=rid)
     with pytest.raises(LimitReached, match="browser daily download cap"):
         led.check("browser", "browser:10.1021")
     # other channels are unaffected
@@ -166,3 +177,156 @@ def test_real_browser_rejects_html_as_pdf(tmp_path, monkeypatch):
     assert res.status == "fail" and "not a PDF" in res.reason
     assert not (tmp_path / "10.1088_x.pdf").exists()
     assert led.usage()["browser"]["attempts"] == 1 and led.usage()["browser"]["ok"] == 0
+
+
+# --- review findings on PR #7 -------------------------------------------------------
+
+
+def test_pending_reservation_counts_against_success_cap(tmp_path):
+    led = _ledger(tmp_path, browser=dict(daily_ok=1, gap_s=0, jitter_s=0))
+    led.acquire("browser", "h")  # in flight, not finalized yet
+    with pytest.raises(LimitReached, match="download cap"):
+        led.acquire("browser", "h2")
+
+
+def test_failed_reservation_releases_success_slot(tmp_path):
+    led = _ledger(tmp_path, browser=dict(daily_ok=1, gap_s=0, jitter_s=0))
+    rid = led.acquire("browser", "h")
+    led.record("browser", "h", "d", "fail", reservation=rid)
+    led.acquire("browser", "h2")  # does not raise
+    assert led.usage()["browser"]["attempts"] == 2
+
+
+def _worker(path, q):
+    led = Ledger(path, limits={**{k: dict(v) for k, v in ratelimit.DEFAULT_LIMITS.items()},
+                               "browser": dict(daily_ok=1, daily_attempts=50, gap_s=0, jitter_s=0)})
+    try:
+        led.acquire("browser", "h")
+        q.put("got")
+    except LimitReached:
+        q.put("refused")
+
+
+def test_concurrent_processes_cannot_both_take_last_slot(tmp_path):
+    path = tmp_path / "l.sqlite"
+    Ledger(path)  # create schema
+    ctx = mp.get_context("spawn")
+    q = ctx.Queue()
+    procs = [ctx.Process(target=_worker, args=(path, q)) for _ in range(6)]
+    for p in procs:
+        p.start()
+    for p in procs:
+        p.join(60)
+    got = sorted(q.get(timeout=5) for _ in procs)
+    assert got.count("got") == 1 and got.count("refused") == 5
+
+
+def test_concurrent_slots_are_spaced_by_gap(tmp_path, monkeypatch):
+    monkeypatch.setattr(ratelimit.time, "sleep", lambda s: None)
+    a = _ledger(tmp_path, browser=dict(gap_s=60, jitter_s=0))
+    b = _ledger(tmp_path, browser=dict(gap_s=60, jitter_s=0))
+    a.acquire("browser", "h")
+    b.acquire("browser", "h")
+    ts = [row[0] for row in a.db.execute("select ts from attempts order by ts")]
+    assert ts[1] - ts[0] >= 59.9
+
+
+def test_extension_plain_403_does_not_cool_down(tmp_path, monkeypatch):
+    monkeypatch.setenv("PLAYWRIGHT_MCP_EXTENSION_TOKEN", "x")
+    led = _ledger(tmp_path, browser=dict(gap_s=0, jitter_s=0))
+    rb = RealBrowser(cli="/bin/false", ledger=led, settle_checks=1, settle_s=0)
+    page = base64.b64encode(b"<html><p>Purchase this article. You do not have access.</p></html>").decode()
+
+    def fake_run(*args, **kw):
+        if args[0] == "eval" and args[1] == "1":
+            return "### Result\n1\n"
+        if args[0] == "eval":
+            return '### Result\n"Some article - Publisher"\n'
+        if args[0] == "run-code":
+            return f'### Result\n"B64:403:text/html:{page}:END:https://p.org/pdf"\n'
+        return ""
+
+    monkeypatch.setattr(rb, "_run", fake_run)
+    assert rb.download("10.1088/a", tmp_path).status == "fail"
+    assert led.cooling("browser:10.1088") is None
+    led.check("browser", "browser:10.1088")
+
+
+def test_extension_akamai_403_cools_down(tmp_path, monkeypatch):
+    monkeypatch.setenv("PLAYWRIGHT_MCP_EXTENSION_TOKEN", "x")
+    led = _ledger(tmp_path, browser=dict(gap_s=0, jitter_s=0))
+    rb = RealBrowser(cli="/bin/false", ledger=led, settle_checks=1, settle_s=0)
+    page = base64.b64encode(b"<title>Access Denied</title> Reference #18.abc").decode()
+
+    def fake_run(*args, **kw):
+        if args[0] == "eval" and args[1] == "1":
+            return "### Result\n1\n"
+        if args[0] == "eval":
+            return '### Result\n"Some article"\n'
+        return f'### Result\n"B64:403:text/html:{page}:END:https://p.org/pdf"\n'
+
+    monkeypatch.setattr(rb, "_run", fake_run)
+    rb.download("10.3390/a", tmp_path)
+    assert led.cooling("browser:10.3390")
+
+
+def _session_with(led, monkeypatch, status=200, body=b"{}"):
+    sent = []
+
+    def fake_send(self, request, **kw):
+        sent.append(request.url)
+        resp = requests.Response()
+        resp.status_code, resp._content, resp.url = status, body, request.url
+        resp.request = request
+        return resp
+
+    monkeypatch.setattr(requests.adapters.HTTPAdapter, "send", fake_send)
+    s = requests.Session()
+    ratelimit.install(led, [s], channel="oa")
+    return s, sent
+
+
+def test_adapter_paces_by_real_host_across_doi_prefixes(tmp_path, monkeypatch):
+    slept = []
+    monkeypatch.setattr(ratelimit.time, "sleep", lambda s: slept.append(s))
+    led = _ledger(tmp_path, oa=dict(gap_s=5, jitter_s=0))
+    s, sent = _session_with(led, monkeypatch)
+    s.get("https://api.openalex.org/works/doi:10.1021/a")
+    s.get("https://api.openalex.org/works/doi:10.1039/b")  # different prefix, same host
+    hosts = [r[0] for r in led.db.execute("select host from requests")]
+    assert hosts == ["api.openalex.org", "api.openalex.org"]
+    assert slept and slept[0] > 0  # second call had to wait for the shared host slot
+
+
+def test_adapter_publisher_host_daily_cap_and_metadata_exempt(tmp_path, monkeypatch):
+    monkeypatch.setattr(ratelimit.time, "sleep", lambda s: None)
+    led = _ledger(tmp_path)
+    led.per_host_daily_requests = 2
+    s, _ = _session_with(led, monkeypatch)
+    s.get("https://pubs.example.org/a.pdf")
+    s.get("https://pubs.example.org/b.pdf")
+    with pytest.raises(HostLimited, match="pubs.example.org daily request cap"):
+        s.get("https://pubs.example.org/c.pdf")
+    for i in range(5):  # metadata APIs are not capped per host
+        s.get(f"https://api.openalex.org/works/{i}")
+
+
+def test_adapter_block_signal_cools_real_host(tmp_path, monkeypatch):
+    monkeypatch.setattr(ratelimit.time, "sleep", lambda s: None)
+    led = _ledger(tmp_path)
+    s, _ = _session_with(led, monkeypatch, status=403, body=b"<title>Access Denied</title>")
+    s.get("https://www.mdpi.com/x/pdf")
+    assert led.cooling("www.mdpi.com")
+    with pytest.raises(HostLimited, match="cooldown"):
+        s.get("https://www.mdpi.com/y/pdf")
+
+
+def test_adapter_plain_403_and_429(tmp_path, monkeypatch):
+    monkeypatch.setattr(ratelimit.time, "sleep", lambda s: None)
+    led = _ledger(tmp_path)
+    s, _ = _session_with(led, monkeypatch, status=403, body=b"<p>no subscription</p>")
+    s.get("https://pubs.example.org/x.pdf")
+    assert led.cooling("pubs.example.org") is None
+    s2, _ = _session_with(led, monkeypatch, status=429, body=b"")
+    s2.get("https://api.example.com/x")
+    assert led.cooling("api.example.com")

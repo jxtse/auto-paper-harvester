@@ -11,7 +11,8 @@ import time
 import requests
 from requests.utils import parse_header_links
 
-from .ratelimit import Ledger, LimitReached, block_signal_from_message
+from .ratelimit import HostLimited, Ledger, LimitReached
+from .ratelimit import install as install_pacing
 from .supplements import download_supplements_for_doi
 
 LOGGER = logging.getLogger(__name__)
@@ -1108,21 +1109,36 @@ def batched_download(
     """
     Download a batch of records, routing each entry to the appropriate publisher client.
 
-    When ``ledger`` is given, every record first passes :meth:`Ledger.acquire` (daily caps,
-    per-host spacing, cooldowns). Records refused by the ledger are reported as failed with a
-    ``rate_limited`` reason instead of being requested, and block signals (429, CAPTCHA,
-    Akamai "Access Denied") put that publisher in cooldown.
+    When ``ledger`` is given:
+
+    * each record first reserves one attempt against the channel and global daily caps
+      (:meth:`Ledger.acquire`, atomic across processes); refused records are reported as
+      failed with a ``rate_limited`` reason and never requested;
+    * every HTTP request made by the clients is paced and capped by its **real host**
+      (OpenAlex, Unpaywall, the publisher's PDF host, redirects included) through a
+      :class:`~auto_paper_download.ratelimit.PacedAdapter`, and a 429 / CAPTCHA / Akamai
+      "Access Denied" response puts that host into cooldown.
     """
     supplement_session = requests.Session()
     supplement_session.headers.setdefault("User-Agent", DEFAULT_USER_AGENT)
 
-    def _ledger_keys(record: ArticleRecord) -> tuple[str, str]:
+    current_channel = ["oa"]
+    if ledger is not None:
+        install_pacing(
+            ledger,
+            [supplement_session]
+            + [getattr(cl, "_session", None) for cl in (
+                elsevier_client, crossref_client, openalex_client,
+                unpaywall_client, springer_client, wiley_client)],
+            channel=lambda: current_channel[0],
+        )
+
+    def _ledger_channel(record: ArticleRecord) -> str:
         pub = (record.publisher or "").lower()
-        prefix = (record.doi or "").split("/", 1)[0] or "unknown"
         for name in ("elsevier", "wiley", "springer"):
             if name in pub:
-                return name, f"api:{name}"
-        return "oa", f"oa:{prefix}"
+                return name
+        return "oa"
 
     def _attempt_unpaywall_download(
         doi: str, destination: Path
@@ -1170,10 +1186,11 @@ def batched_download(
                     metrics_entry["succeeded"] += 1
                 continue
 
-        ledger_channel, ledger_host = _ledger_keys(record)
+        ledger_channel = current_channel[0] = _ledger_channel(record)
+        reservation: Optional[int] = None
         if ledger is not None:
             try:
-                ledger.acquire(ledger_channel, ledger_host)
+                reservation = ledger.acquire(ledger_channel)
             except LimitReached as exc:
                 LOGGER.warning("Rate limit: skipping %s (%s)", record.doi, exc)
                 if metrics_entry is not None and record.doi:
@@ -1364,12 +1381,21 @@ def batched_download(
                 time.sleep(delay_seconds)
         except Exception as exc:  # noqa: BLE001
             ledger_note = f"{type(exc).__name__}: {exc}"
+            limited = next((e for e in (exc, exc.__cause__, exc.__context__)
+                            if isinstance(e, LimitReached)), None)
+            if limited is not None:
+                # host_limited: only this HTTP host is paused, the browser fallback may retry.
+                # rate_limited: a channel/global cap, nothing should retry today.
+                tag = "host_limited" if isinstance(limited, HostLimited) else "rate_limited"
+                ledger_note = f"{tag}: {limited}"
             if article_dir:
                 _cleanup_article_dir(article_dir)
             # Record failed DOIs so an outer caller (e.g. browser fallback) can retry.
             if metrics_entry is not None and record.doi:
                 metrics_entry["failed_dois"].append(
-                    {"doi": record.doi, "reason": f"{type(exc).__name__}: {exc}"}
+                    {"doi": record.doi,
+                     "reason": ledger_note if limited is not None
+                     else f"{type(exc).__name__}: {exc}"}
                 )
             if isinstance(exc, DownloadError):
                 LOGGER.warning(
@@ -1386,10 +1412,8 @@ def batched_download(
                 raise
             continue
         finally:
-            if ledger is not None:
-                ledger.record(ledger_channel, ledger_host, record.doi or "",
-                              "ok" if pdf_downloaded else "fail", None, 0, ledger_note)
-                cooldown = block_signal_from_message(ledger_note) if ledger_note else None
-                if cooldown:
-                    ledger.block(ledger_host, ledger_note[:200], seconds=cooldown)
-                    LOGGER.warning("Block signal from %s; cooling down %.0f h", ledger_host, cooldown / 3600)
+            if ledger is not None and reservation is not None:
+                # Cooldowns are set per real host by the PacedAdapter, not here.
+                ledger.record(ledger_channel, None, record.doi or "",
+                              "ok" if pdf_downloaded else "fail", None, 0, ledger_note,
+                              reservation=reservation)
