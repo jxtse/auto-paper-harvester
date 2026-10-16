@@ -24,4 +24,5 @@ _debug
 settings.json
 
 /downloads
-/.venv
+/.venv/dist
+/build

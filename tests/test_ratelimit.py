@@ -457,4 +457,4 @@ def test_supplement_limit_after_saved_pdf_is_not_a_failed_doi(tmp_path, monkeypa
     m = metrics["Elsevier"]
     assert m["succeeded"] == 1 and m["failed_dois"] == []  # no browser re-download
     status, note = led.db.execute("select status, note from attempts").fetchone()
-    assert status == "ok" and note.startswith("pdf ok; supplements host_limited")
+    assert status == "ok" and "supplements host_limited" in note

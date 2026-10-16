@@ -1,0 +1,37 @@
+name: release
+
+# Push a tag like v0.3.0 to build the wheel and attach it to a GitHub release.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Test
+        run: |
+          uv venv
+          uv pip install -e '.[dev]'
+          .venv/bin/python -m pytest -q
+      - name: Build
+        run: uv build -o dist .
+      - name: Check the wheel installs and contains the UI and skill
+        run: |
+          uv venv /tmp/w
+          uv pip install -p /tmp/w dist/*.whl
+          /tmp/w/bin/auto-paper-download skill > /dev/null
+          /tmp/w/bin/python -c "import importlib.resources as r; assert r.files('auto_paper_download').joinpath('ui/index.html').is_file()"
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --generate-notes \
+            || gh release upload "$GITHUB_REF_NAME" dist/* --clobber

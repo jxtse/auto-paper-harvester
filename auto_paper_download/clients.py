@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, Iterator, MutableMapping, Optional, Sequence
+from typing import Callable, Iterable, Iterator, MutableMapping, Optional, Sequence
 from urllib.parse import quote
 import time
 
@@ -1107,7 +1107,14 @@ def batched_download(
     ledger: Optional["Ledger"] = None,
 ) -> Iterator[Path]:
     """
-    Download a batch of records, routing each entry to the appropriate publisher client.
+    Download a batch of records. For each paper the sources are tried in a fixed order:
+
+    1. open access: OpenAlex, then Unpaywall, then (for publishers without a TDM API)
+       the full-text link in the Crossref record;
+    2. the publisher's TDM API (Elsevier / Wiley / Springer), only if its key is configured.
+
+    Papers that no source could deliver are reported in ``metrics[...]["failed_dois"]`` so the
+    caller can hand them to the browser pass (step 3, opt-in).
 
     When ``ledger`` is given:
 
@@ -1133,30 +1140,42 @@ def batched_download(
             channel=lambda: current_channel[0],
         )
 
-    def _ledger_channel(record: ArticleRecord) -> str:
-        pub = (record.publisher or "").lower()
-        for name in ("elsevier", "wiley", "springer"):
-            if name in pub:
-                return name
-        return "oa"
-
-    def _attempt_unpaywall_download(
-        doi: str, destination: Path
-    ) -> Optional[Path]:
-        if not unpaywall_client or not doi:
-            return None
+    def _is_pdf(path: Path) -> bool:
         try:
-            return unpaywall_client.download_pdf(
-                doi=doi,
-                destination=destination,
-                overwrite=overwrite,
-            )
-        except DownloadError as exc:
-            LOGGER.debug("Unpaywall fallback failed for %s: %s", doi, exc)
-            return None
+            with path.open("rb") as fh:
+                return b"%PDF" in fh.read(1024)
+        except OSError:
+            return False
+
+    def _phases(record: ArticleRecord) -> list[tuple[str, list[tuple[str, Callable[[Path], Path]]]]]:
+        """Ordered download phases: open access first, then the publisher's TDM API if configured."""
+        doi = record.doi
+        pub = (record.publisher or "").lower()
+        tdm_publisher = any(name in pub for name in ("elsevier", "wiley", "springer"))
+        oa: list[tuple[str, Callable[[Path], Path]]] = []
+        if doi:
+            # Crossref's full-text link for Elsevier/Wiley/Springer points at their TDM API,
+            # which the next phase calls properly, so it is only tried for other publishers.
+            sources = [("OpenAlex", openalex_client), ("Unpaywall", unpaywall_client)]
+            if not tdm_publisher:
+                sources.append(("Crossref", crossref_client))
+            for label, client in sources:
+                if client is not None:
+                    oa.append((label, lambda d, c=client: c.download_pdf(doi=doi, destination=d,
+                                                                          overwrite=True)))
+        phases = [("oa", oa)]
+        if "elsevier" in pub and elsevier_client is not None and (doi or record.pii):
+            phases.append(("elsevier", [("Elsevier TDM", lambda d: elsevier_client.download_pdf(
+                doi=doi, pii=record.pii, destination=d, overwrite=True))]))
+        elif "wiley" in pub and wiley_client is not None and doi:
+            phases.append(("wiley", [("Wiley TDM", lambda d: wiley_client.download_pdf(
+                doi=doi, destination=d, overwrite=True))]))
+        elif "springer" in pub and springer_client is not None and doi:
+            phases.append(("springer", [("Springer API", lambda d: springer_client.download_pdf(
+                doi=doi, destination=d, overwrite=True))]))
+        return [(ch, stages) for ch, stages in phases if stages]
 
     for record in records:
-        publisher = (record.publisher or "").lower()
         publisher_label = record.publisher or "Unknown"
         metrics_entry: Optional[dict[str, int]] = None
         if metrics is not None:
@@ -1165,66 +1184,84 @@ def batched_download(
             )
             metrics_entry.setdefault("failed_dois", [])
             metrics_entry["attempted"] += 1
-        article_dir: Optional[Path] = None
-        pdf_downloaded = False
-        
-        # Early check: if PDF already exists and overwrite is False, skip everything
-        identifier = None
-        if "elsevier" in publisher:
-            identifier = record.doi or record.pii
-        elif "wiley" in publisher or "springer" in publisher or "crossref" in publisher:
-            identifier = record.doi
-        
-        if identifier and not overwrite:
-            fname = _safe_identifier(identifier)
-            article_dir_check = output_root / fname
-            pdf_path_check = _article_destination(article_dir_check, fname)
-            if pdf_path_check.exists():
-                LOGGER.info("跳过已存在的文章（PDF和SI均跳过）: %s", identifier)
-                yield pdf_path_check
-                if metrics_entry:
+
+        identifier = record.doi or record.pii
+        if not identifier:
+            LOGGER.warning("Skipping record without DOI/PII: %s", record.title)
+            continue
+        fname = _safe_identifier(identifier)
+        article_dir = output_root / fname
+
+        if not overwrite:
+            existing = article_dir / f"{fname}.pdf"
+            if existing.exists() or (article_dir / "article.pdf").exists():
+                existing = _article_destination(article_dir, fname)
+                LOGGER.info("Already downloaded, skipping (PDF and SI): %s", identifier)
+                yield existing
+                if metrics_entry is not None:
                     metrics_entry["succeeded"] += 1
                 continue
 
-        ledger_channel = current_channel[0] = _ledger_channel(record)
-        reservation: Optional[int] = None
-        if ledger is not None:
-            try:
-                reservation = ledger.acquire(ledger_channel)
-            except LimitReached as exc:
-                LOGGER.warning("Rate limit: skipping %s (%s)", record.doi, exc)
-                if metrics_entry is not None and record.doi:
-                    metrics_entry["failed_dois"].append(
-                        {"doi": record.doi, "reason": f"rate_limited: {exc}"}
-                    )
-                continue
-        ledger_note = ""
-
+        pdf_saved: Optional[Path] = None
+        reasons: list[str] = []
+        win_channel, win_res, win_note = "oa", None, ""
+        open_res: Optional[tuple[str, int]] = None  # reservation to release if interrupted
         try:
-            if "elsevier" in publisher:
-                if not elsevier_client:
-                    raise DownloadError("ElsevierClient missing for Elsevier record.")
-                identifier = record.doi or record.pii
-                if not identifier:
-                    raise DownloadError(f"No DOI/PII for Elsevier record: {record}")
-                fname = _safe_identifier(identifier)
-                article_dir = output_root / fname
-                pdf_path = _article_destination(article_dir, fname)
+            for channel, stages in _phases(record):
+                current_channel[0] = channel
+                reservation: Optional[int] = None
+                if ledger is not None:
+                    try:
+                        reservation = ledger.acquire(channel)
+                    except LimitReached as exc:
+                        reasons.append(f"rate_limited: {exc}")
+                        continue
+                    open_res = (channel, reservation)
+                notes: list[str] = []
+                for label, fetch in stages:
+                    dest = _article_destination(article_dir, fname)
+                    try:
+                        got = fetch(dest)
+                        if not _is_pdf(got):
+                            got.unlink()
+                            raise DownloadError(f"{label} returned something that is not a PDF")
+                        pdf_saved = got
+                        notes.append(f"{label}: ok")
+                        break
+                    except HostLimited as exc:  # this host is paused; another source may work
+                        notes.append(f"{label}: host_limited: {exc}")
+                    except LimitReached as exc:  # channel/global cap: stop this phase
+                        notes.append(f"{label}: rate_limited: {exc}")
+                        break
+                    except Exception as exc:  # noqa: BLE001 - try the next source
+                        notes.append(f"{label}: {type(exc).__name__}: {exc}")
+                        LOGGER.debug("%s failed for %s: %s", label, identifier, exc)
+                note = "; ".join(notes)
+                if pdf_saved is not None:
+                    win_channel, win_res, win_note = channel, reservation, note
+                    break
+                reasons.append(note)
+                if ledger is not None and reservation is not None:
+                    ledger.record(channel, None, record.doi or "", "fail", None, 0, note,
+                                  reservation=reservation)
+                    open_res = None
+
+            if pdf_saved is None:
+                _cleanup_article_dir(article_dir)
+                real = [r for r in reasons if not r.startswith("rate_limited")]
+                reason = (real[-1] if real else (reasons[0] if reasons else
+                          "no_source: no open-access client or TDM key configured"))
+                if metrics_entry is not None and record.doi:
+                    metrics_entry["failed_dois"].append({"doi": record.doi, "reason": reason})
+                LOGGER.warning("Skipping %s (%s): %s", identifier, publisher_label, reason)
+                if raise_on_error:
+                    raise DownloadError(reason)
+                continue
+
+            LOGGER.info("PDF saved via %s: %s", win_note.split(":")[0], pdf_saved)
+            yield pdf_saved
+            if record.doi:
                 try:
-                    pdf_path = elsevier_client.download_pdf(
-                        doi=record.doi,
-                        pii=record.pii,
-                        destination=pdf_path,
-                        overwrite=overwrite,
-                    )
-                except DownloadError:
-                    fallback = _attempt_unpaywall_download(record.doi or "", pdf_path)
-                    if fallback is None:
-                        raise
-                    pdf_path = fallback
-                pdf_downloaded = True
-                yield pdf_path
-                if record.doi:
                     for supplemental in download_supplements_for_doi(
                         doi=record.doi,
                         destination_dir=article_dir,
@@ -1233,196 +1270,22 @@ def batched_download(
                         publisher=record.publisher,
                     ):
                         yield supplemental
-            elif "wiley" in publisher:
-                if not wiley_client:
-                    raise DownloadError("WileyClient missing for Wiley record.")
-                if not record.doi:
-                    raise DownloadError(f"No DOI for Wiley record: {record}")
-                fname = _safe_identifier(record.doi)
-                article_dir = output_root / fname
-                pdf_path = _article_destination(article_dir, fname)
-                try:
-                    pdf_path = wiley_client.download_pdf(
-                        doi=record.doi,
-                        destination=pdf_path,
-                        overwrite=overwrite,
-                    )
-                except DownloadError:
-                    fallback = _attempt_unpaywall_download(record.doi, pdf_path)
-                    if fallback is None:
-                        raise
-                    pdf_path = fallback
-                pdf_downloaded = True
-                yield pdf_path
-                for supplemental in download_supplements_for_doi(
-                    doi=record.doi,
-                    destination_dir=article_dir,
-                    session=supplement_session,
-                    overwrite=overwrite,
-                    publisher=record.publisher,
-                ):
-                    yield supplemental
-            elif "springer" in publisher:
-                if not springer_client:
-                    raise DownloadError("SpringerClient missing for Springer record.")
-                if not record.doi:
-                    raise DownloadError(f"No DOI for Springer record: {record}")
-                fname = _safe_identifier(record.doi)
-                article_dir = output_root / fname
-                pdf_path = _article_destination(article_dir, fname)
-                try:
-                    pdf_path = springer_client.download_pdf(
-                        doi=record.doi,
-                        destination=pdf_path,
-                        overwrite=overwrite,
-                    )
-                except DownloadError as exc:
-                    fallback = _attempt_unpaywall_download(record.doi, pdf_path)
-                    if fallback is None:
-                        message = str(exc).lower()
-                        if "metadata not found" in message or "download failed (403" in message:
-                            LOGGER.info(
-                                "Springer DOI %s 跳过：需订阅访问，手动登录后再获取 PDF。", record.doi
-                            )
-                            _cleanup_article_dir(article_dir)
-                            # Record this so an optional outer pass (e.g. the
-                            # Playwright browser fallback) can retry. Without this
-                            # line, paywalled Springer DOIs are silently dropped
-                            # and the browser pass never sees them.
-                            if metrics_entry is not None:
-                                metrics_entry["failed_dois"].append({
-                                    "doi": record.doi,
-                                    "reason": f"springer_subscription_required: {exc}",
-                                })
-                            if delay_seconds:
-                                time.sleep(delay_seconds)
-                            continue
-                        raise
-                    pdf_path = fallback
-                pdf_downloaded = True
-                yield pdf_path
-                for supplemental in download_supplements_for_doi(
-                    doi=record.doi,
-                    destination_dir=article_dir,
-                    session=supplement_session,
-                    overwrite=overwrite,
-                    publisher=record.publisher,
-                ):
-                    yield supplemental
-            elif "crossref" in publisher:
-                if not record.doi:
-                    raise DownloadError(f"No DOI for Crossref record: {record}")
-                fname = _safe_identifier(record.doi)
-                article_dir = output_root / fname
-                destination = _article_destination(article_dir, fname)
-                tried: list[Exception] = []
-                success = False
-                pdf_path: Optional[Path] = None
-                if openalex_client:
-                    try:
-                        pdf_path = openalex_client.download_pdf(
-                            doi=record.doi,
-                            destination=destination,
-                            overwrite=overwrite,
-                        )
-                        success = True
-                    except Exception as exc:  # noqa: BLE001
-                        LOGGER.debug(
-                            "OpenAlexClient failed for %s (%s); falling back to Crossref if possible",
-                            record.doi,
-                            exc,
-                        )
-                        tried.append(exc)
-                if not success and crossref_client:
-                    try:
-                        pdf_path = crossref_client.download_pdf(
-                            doi=record.doi,
-                            destination=destination,
-                            overwrite=overwrite,
-                        )
-                        success = True
-                    except Exception as exc:  # noqa: BLE001
-                        LOGGER.debug(
-                            "CrossrefClient failed for %s (%s)",
-                            record.doi,
-                            exc,
-                        )
-                        tried.append(exc)
-                if not success:
-                    fallback = _attempt_unpaywall_download(record.doi, destination)
-                    if fallback is not None:
-                        pdf_path = fallback
-                        success = True
-                if not success:
-                    if tried:
-                        raise tried[-1]
-                    raise DownloadError(
-                        "Neither OpenAlexClient nor CrossrefClient configured for Crossref record."
-                    )
-                if not pdf_path:
-                    raise DownloadError(f"Unable to resolve PDF for Crossref DOI {record.doi}")
-                pdf_downloaded = True
-                yield pdf_path
-                for supplemental in download_supplements_for_doi(
-                    doi=record.doi,
-                    destination_dir=article_dir,
-                    session=supplement_session,
-                    overwrite=overwrite,
-                    publisher=record.publisher,
-                ):
-                    yield supplemental
-            else:
-                raise DownloadError(
-                    f"Unsupported publisher for record {record.publisher}: {record.title}"
-                )
-            if metrics_entry and pdf_downloaded:
+                except LimitReached as exc:
+                    tag = "host_limited" if isinstance(exc, HostLimited) else "rate_limited"
+                    win_note += f"; supplements {tag}: {exc}"
+                    LOGGER.warning("Supplements for %s skipped: %s", identifier, exc)
+                except Exception as exc:  # noqa: BLE001 - the PDF is what matters
+                    win_note += f"; supplements {type(exc).__name__}: {exc}"
+                    LOGGER.warning("Supplements for %s failed: %s", identifier, exc)
+            if metrics_entry is not None:
                 metrics_entry["succeeded"] += 1
-            if delay_seconds:
-                time.sleep(delay_seconds)
-        except Exception as exc:  # noqa: BLE001
-            ledger_note = f"{type(exc).__name__}: {exc}"
-            limited = next((e for e in (exc, exc.__cause__, exc.__context__)
-                            if isinstance(e, LimitReached)), None)
-            if limited is not None:
-                # host_limited: only this HTTP host is paused, the browser fallback may retry.
-                # rate_limited: a channel/global cap, nothing should retry today.
-                tag = "host_limited" if isinstance(limited, HostLimited) else "rate_limited"
-                ledger_note = f"{tag}: {limited}"
-            if article_dir:
-                _cleanup_article_dir(article_dir)
-            if pdf_downloaded and limited is not None:
-                # The PDF is already saved; only a supplementary file hit a limit. Do not
-                # schedule the paper for a browser retry, which would download it again.
-                LOGGER.warning("Supplements for %s skipped: %s", record.doi or record.title,
-                               ledger_note)
-                ledger_note = f"pdf ok; supplements {ledger_note}"
-                if metrics_entry is not None:
-                    metrics_entry["succeeded"] += 1
-                continue
-            # Record failed DOIs so an outer caller (e.g. browser fallback) can retry.
-            if metrics_entry is not None and record.doi:
-                metrics_entry["failed_dois"].append(
-                    {"doi": record.doi,
-                     "reason": ledger_note if limited is not None
-                     else f"{type(exc).__name__}: {exc}"}
-                )
-            if isinstance(exc, DownloadError):
-                LOGGER.warning(
-                    "Skipping %s (%s)：%s",
-                    record.doi or record.title,
-                    record.publisher,
-                    exc,
-                )
-                if raise_on_error:
-                    raise
-                continue
-            LOGGER.exception("Failed to download %s (%s)", record.title, record.publisher)
-            if raise_on_error:
-                raise
-            continue
+            if ledger is not None and win_res is not None:
+                ledger.record(win_channel, None, record.doi or "", "ok", None, 0,
+                              f"pdf ok; {win_note}", reservation=win_res)
+                open_res = None
         finally:
-            if ledger is not None and reservation is not None:
-                # Cooldowns are set per real host by the PacedAdapter, not here.
-                ledger.record(ledger_channel, None, record.doi or "",
-                              "ok" if pdf_downloaded else "fail", None, 0, ledger_note,
-                              reservation=reservation)
+            if ledger is not None and open_res is not None:  # interrupted mid-phase
+                ledger.record(open_res[0], None, record.doi or "", "fail", None, 0,
+                              "interrupted", reservation=open_res[1])
+        if delay_seconds:
+            time.sleep(delay_seconds)
