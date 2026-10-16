@@ -415,3 +415,46 @@ def test_cli_loads_dotenv_before_ledger(tmp_path, monkeypatch):
         pass
     assert seen["ledger"].global_daily_ok == 5
     assert seen["ledger"].limits["oa"]["daily_ok"] == 2
+
+
+def test_queued_request_rechecks_cooldown_after_wait(tmp_path, monkeypatch):
+    """A request that waited for its slot must not be sent if the host was blocked meanwhile."""
+    led = _ledger(tmp_path)
+    led.limits["oa"].update(gap_s=30, jitter_s=0)
+    led.pace_request("pubs.example.org", "oa")  # first request takes the free slot
+
+    def sleep_while_other_process_blocks(seconds):
+        # simulates process A getting a bot wall while this request (B) waits
+        _ledger(tmp_path).block("pubs.example.org", "HTTP 429 block signal (oa)", seconds=3600)
+
+    monkeypatch.setattr(ratelimit.time, "sleep", sleep_while_other_process_blocks)
+    with pytest.raises(HostLimited, match="cooldown"):
+        led.pace_request("pubs.example.org", "oa")
+
+
+def test_supplement_limit_after_saved_pdf_is_not_a_failed_doi(tmp_path, monkeypatch):
+    from auto_paper_download import clients
+
+    class FakeElsevier:
+        def download_pdf(self, *, doi, pii, destination, overwrite):
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(b"%PDF-1.7")
+            return destination
+
+    def limited_supplements(**kw):
+        raise HostLimited("doi.org in cooldown until tomorrow")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(clients, "download_supplements_for_doi", limited_supplements)
+    monkeypatch.setattr(ratelimit.time, "sleep", lambda s: None)
+    led = _ledger(tmp_path)
+    metrics = {}
+    rec = clients.ArticleRecord(title="t", doi="10.1016/j.x.2020.1", publisher="Elsevier")
+    got = list(clients.batched_download(records=[rec], output_root=tmp_path / "out",
+                                        elsevier_client=FakeElsevier(), raise_on_error=False,
+                                        metrics=metrics, ledger=led))
+    assert len(got) == 1 and got[0].read_bytes().startswith(b"%PDF")
+    m = metrics["Elsevier"]
+    assert m["succeeded"] == 1 and m["failed_dois"] == []  # no browser re-download
+    status, note = led.db.execute("select status, note from attempts").fetchone()
+    assert status == "ok" and note.startswith("pdf ok; supplements host_limited")

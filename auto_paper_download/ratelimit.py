@@ -328,6 +328,11 @@ class Ledger:
         wait = slot - time.time()
         if wait > 0:
             time.sleep(wait)
+            # Another process may have hit a bot wall on this host while we waited for our
+            # slot; re-check so a queued request is never sent into a fresh cooldown.
+            msg = self.cooling(host)
+            if msg:
+                raise HostLimited(msg)
 
 
 class PacedAdapter(HTTPAdapter):

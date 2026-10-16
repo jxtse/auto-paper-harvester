@@ -1390,6 +1390,15 @@ def batched_download(
                 ledger_note = f"{tag}: {limited}"
             if article_dir:
                 _cleanup_article_dir(article_dir)
+            if pdf_downloaded and limited is not None:
+                # The PDF is already saved; only a supplementary file hit a limit. Do not
+                # schedule the paper for a browser retry, which would download it again.
+                LOGGER.warning("Supplements for %s skipped: %s", record.doi or record.title,
+                               ledger_note)
+                ledger_note = f"pdf ok; supplements {ledger_note}"
+                if metrics_entry is not None:
+                    metrics_entry["succeeded"] += 1
+                continue
             # Record failed DOIs so an outer caller (e.g. browser fallback) can retry.
             if metrics_entry is not None and record.doi:
                 metrics_entry["failed_dois"].append(
